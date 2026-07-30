@@ -1,0 +1,4 @@
+name: check_system_info
+description: "Shows hardware specs and OS information for the server: CPU model, OS version, kernel version, architecture"
+privilege_tier: read_only
+parameters: []
