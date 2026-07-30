@@ -1,0 +1,12 @@
+name: start_container
+description: "Starts a Docker container that is currently stopped. Requires explicit user confirmation via /confirm before it takes effect."
+privilege_tier: confirm_required
+parameters:
+  - name: container_name
+    type: string
+    description: "The name of the container to start (e.g. jellyfin, pihole, samba, uptime-kuma)"
+    required: true
+  - name: confirmed
+    type: boolean
+    description: "Leave as false/default. Set to true automatically by the system after user confirmation."
+    required: false
