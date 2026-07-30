@@ -1,0 +1,4 @@
+name: check_disk_space
+description: "Shows available and used disk space on the server"
+privilege_tier: read_only
+parameters: []

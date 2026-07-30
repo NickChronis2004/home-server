@@ -1,0 +1,4 @@
+name: check_system_resources
+description: "Shows current CPU and RAM usage on the server"
+privilege_tier: read_only
+parameters: []

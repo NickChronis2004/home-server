@@ -1,0 +1,8 @@
+name: get_container_logs
+description: "Shows the most recent log lines from a specific Docker container. Use this to help diagnose issues with a service."
+privilege_tier: read_only
+parameters:
+  - name: container_name
+    type: string
+    description: "The name of the container to get logs from (e.g. jellyfin, pihole, samba)"
+    required: true

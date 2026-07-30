@@ -1,0 +1,39 @@
+# JARVIS Policy File — hardcoded rules, LLM cannot override these
+
+version: 1
+
+# Containers that NO tool may ever touch, read or write
+protected_containers:
+  - vaultwarden
+
+# Containers allowed as targets for restart-type operations
+restart_allowed_targets:
+  - jellyfin
+  - pihole
+  - uptime-kuma
+  - samba
+
+# Tools that require human confirmation before execution
+confirmation_required:
+  - restart_container
+  - update_container
+
+# Tools that never require confirmation (pure read-only)
+auto_approved:
+  - check_docker_status
+  - check_disk_space
+  - check_system_resources
+  - get_container_logs
+
+# Circuit breaker limits
+limits:
+  max_write_calls_per_confirmation: 1
+  max_tool_steps_per_request: 5
+  max_consecutive_failures: 2
+  restart_cooldown_seconds: 120
+  confirmation_expiry_seconds: 120
+
+# Log line limits (avoid dumping huge/malicious content to the LLM)
+log_output:
+  max_lines: 100
+  max_chars: 4000

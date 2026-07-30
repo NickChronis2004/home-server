@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Runtime data
+logs/*.log
+*.pid
+*.sqlite
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Backups
+*.bak
+*.backup
