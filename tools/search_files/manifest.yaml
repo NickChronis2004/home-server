@@ -1,0 +1,8 @@
+name: search_files
+description: "Searches for files by name pattern inside allowed media directories (movies, tvshows, music). Use this to find specific files, e.g. a movie or song title."
+privilege_tier: read_only
+parameters:
+  - name: query
+    type: string
+    description: "Filename or partial name to search for (case-insensitive)"
+    required: true

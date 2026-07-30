@@ -38,3 +38,7 @@ limits:
 log_output:
   max_lines: 100
   max_chars: 4000
+
+# Paths that file tools are allowed to access - never outside these
+allowed_file_paths:
+  - /home/nickchronis2004/media

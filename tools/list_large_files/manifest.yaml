@@ -1,0 +1,8 @@
+name: list_large_files
+description: "Lists the largest files in the media directory, useful for finding what's taking up disk space"
+privilege_tier: read_only
+parameters:
+  - name: count
+    type: integer
+    description: "How many files to show, default 10"
+    required: false
