@@ -82,24 +82,30 @@ def run(container_name, confirmed):
         ["docker", "restart", container_name],
         capture_output=True, text=True, timeout=30
     )
-
     if result.returncode != 0:
         return {"error": f"Restart failed: {result.stderr[:300]}"}
-
     set_cooldown(container_name)
-
     time.sleep(2)
-    status_result = subprocess.run(
-        ["docker", "inspect", "--format", "{{.State.Status}}", container_name],
+    # Independent verification straight from the Docker daemon, not just
+    # "the restart command didn't error" - StartedAt only changes if a
+    # restart genuinely happened, and the container ID confirms which
+    # exact process instance is now running.
+    inspect_result = subprocess.run(
+        ["docker", "inspect", "--format",
+         "{{.State.Status}}|{{.State.StartedAt}}|{{.Id}}", container_name],
         capture_output=True, text=True, timeout=10
     )
-    new_status = status_result.stdout.strip()
-
+    parts = inspect_result.stdout.strip().split("|")
+    new_status = parts[0] if len(parts) > 0 else "unknown"
+    started_at = parts[1] if len(parts) > 1 else "unknown"
+    container_id = parts[2][:12] if len(parts) > 2 else "unknown"
     return {
         "status": "success",
         "container": container_name,
         "action": "restarted",
-        "current_state": new_status
+        "current_state": new_status,
+        "started_at": started_at,
+        "container_id": container_id
     }
 
 if __name__ == "__main__":

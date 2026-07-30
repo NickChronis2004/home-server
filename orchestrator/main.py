@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 import httpx
 
 from errors import JarvisError, ToolNotFoundError, ManifestError, ModelProviderError, ToolTimeoutError, ToolExecutionError
+from audit import init_db, log_tool_call
 
 BASE_DIR = Path("/app/jarvis")
 TOOLS_DIR = BASE_DIR / "tools"
@@ -17,8 +18,16 @@ PENDING_EXPIRY_SECONDS = 120
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 JARVIS_MODEL = os.environ.get("JARVIS_MODEL", "gpt-4o-mini")
+WRITE_TOOLS_ENABLED = os.environ.get("JARVIS_WRITE_TOOLS_ENABLED", "true").lower() == "true"
+WRITE_TOOL_NAMES = {"restart_container", "stop_container", "start_container"}
+EMERGENCY_TOOL_NAMES = {"protocol_snowfall", "protocol_blackout"}
+LOCKDOWN_FILE = BASE_DIR / "logs" / ".lockdown"
+
+def is_lockdown_active():
+    return LOCKDOWN_FILE.exists()
 
 app = FastAPI()
+init_db()
 
 @app.exception_handler(JarvisError)
 async def handle_jarvis_error(request: Request, exc: JarvisError):
@@ -60,31 +69,72 @@ def discover_tools():
     return tools
 
 def execute_tool(tool_name, arguments, tools):
+    tier = "emergency" if tool_name in EMERGENCY_TOOL_NAMES else ("write" if tool_name in WRITE_TOOL_NAMES else "read_only")
+    confirmed = str(arguments.get("confirmed", "false")).lower() == "true"
+    start = time.monotonic()
+    if tool_name in WRITE_TOOL_NAMES and is_lockdown_active():
+        audit_id = log_tool_call(tool_name, tier, arguments, "denied",
+                       result_summary="Blocked: system is in lockdown (Protocol Snowfall active)",
+                       error_code="LOCKDOWN_ACTIVE", confirmed=confirmed)
+        raise JarvisError(
+            "The system is currently in emergency lockdown. Write actions are disabled; diagnostics remain available. "
+            "Recovery requires direct server access (Protocol Daybreak).",
+            details={"tool": tool_name, "audit_id": audit_id}
+        )
     if tool_name not in tools:
-        raise ToolNotFoundError(f"Unknown tool: {tool_name}")
-
+        audit_id = log_tool_call(tool_name, tier, arguments, "error",
+                       result_summary="Unknown tool", error_code="TOOL_NOT_FOUND",
+                       confirmed=confirmed)
+        raise ToolNotFoundError(f"Unknown tool: {tool_name}", details={"audit_id": audit_id})
+    if tool_name in WRITE_TOOL_NAMES and not WRITE_TOOLS_ENABLED:
+        audit_id = log_tool_call(tool_name, tier, arguments, "denied",
+                       result_summary="Write actions disabled system-wide",
+                       error_code="WRITE_TOOLS_DISABLED", confirmed=confirmed)
+        raise JarvisError(
+            "Write actions are currently disabled system-wide. Ask the administrator to re-enable them.",
+            details={"tool": tool_name, "audit_id": audit_id}
+        )
     script_path = tools[tool_name]["script_path"]
     env = os.environ.copy()
     for key, value in arguments.items():
         env[f"TOOL_ARG_{key}"] = str(value)
-
     try:
         result = subprocess.run(
             ["python3", script_path],
             capture_output=True, text=True, timeout=30, env=env
         )
     except subprocess.TimeoutExpired:
-        raise ToolTimeoutError(f"Tool '{tool_name}' timed out")
-
+        duration_ms = int((time.monotonic() - start) * 1000)
+        audit_id = log_tool_call(tool_name, tier, arguments, "error",
+                       result_summary="Tool timed out", duration_ms=duration_ms,
+                       error_code="TOOL_TIMEOUT", confirmed=confirmed)
+        raise ToolTimeoutError(f"Tool '{tool_name}' timed out", details={"audit_id": audit_id})
+    duration_ms = int((time.monotonic() - start) * 1000)
     if result.returncode != 0:
+        audit_id = log_tool_call(tool_name, tier, arguments, "error",
+                       result_summary=result.stderr[:500], duration_ms=duration_ms,
+                       error_code="TOOL_EXECUTION_FAILED", confirmed=confirmed)
         raise ToolExecutionError(
             f"Tool '{tool_name}' failed",
-            details={"stderr": result.stderr[:500]}
+            details={"stderr": result.stderr[:500], "audit_id": audit_id}
         )
     try:
-        return json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
+        is_logical_error = isinstance(parsed, dict) and "error" in parsed
+        audit_id = log_tool_call(tool_name, tier, arguments,
+                       "error" if is_logical_error else "success",
+                       result_summary=json.dumps(parsed, ensure_ascii=False)[:500],
+                       duration_ms=duration_ms,
+                       error_code="TOOL_LOGICAL_ERROR" if is_logical_error else None,
+                       confirmed=confirmed)
+        if isinstance(parsed, dict):
+            parsed["_audit_id"] = audit_id
+        return parsed
     except json.JSONDecodeError:
-        return {"output": result.stdout[:2000]}
+        audit_id = log_tool_call(tool_name, tier, arguments, "success",
+                       result_summary=result.stdout[:500], duration_ms=duration_ms,
+                       confirmed=confirmed)
+        return {"output": result.stdout[:2000], "_audit_id": audit_id}
 
 def build_openai_tools_schema(tools):
     schema = []
@@ -150,7 +200,7 @@ async def chat_completions(request: dict):
             print(f"[JARVIS] CONFIRMED tool={pending['tool']} target={pending['container_name']} result={result.get('status')}", flush=True)
             content = f"Done. {json.dumps(result, ensure_ascii=False)}"
         except JarvisError as e:
-            content = f"The confirmed action failed: {e.message}"
+            content = f"The confirmed action failed: {e.message} [audit_id: {e.details.get('audit_id', 'n/a')}]"
         return {
             "id": "jarvis-response", "object": "chat.completion",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
@@ -198,7 +248,7 @@ async def chat_completions(request: dict):
                 tool_result = execute_tool(fn_name, fn_args, tools)
                 success = True
             except JarvisError as e:
-                tool_result = {"error": e.message}
+                tool_result = {"error": e.message, "_audit_id": e.details.get("audit_id")}
                 success = False
 
             print(f"[JARVIS] tool={fn_name} args={fn_args} success={success}", flush=True)

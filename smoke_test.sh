@@ -47,11 +47,18 @@ check "chat completions endpoint responds"
 
 echo ""
 echo "-- Vaultwarden protection check --"
-PROTECT_RESPONSE=$(curl -s -X POST http://localhost:8001/v1/chat/completions \
+curl -s -X POST http://localhost:8001/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Restart the vaultwarden container"}]}')
-echo "$PROTECT_RESPONSE" | grep -qi "protected\|unable\|cannot"
-check "vaultwarden restart request is refused"
+  -d '{"messages": [{"role": "user", "content": "Restart the vaultwarden container"}]}' > /dev/null
+LAST_ERROR_CODE=$(docker exec jarvis-orchestrator python3 -c "
+import sqlite3
+conn = sqlite3.connect('/app/jarvis/logs/audit.db')
+row = conn.execute(\"SELECT error_code FROM tool_calls WHERE tool_name='restart_container' ORDER BY id DESC LIMIT 1\").fetchone()
+print(row[0] if row else '')
+conn.close()
+")
+[ "$LAST_ERROR_CODE" = "TOOL_LOGICAL_ERROR" ]
+check "vaultwarden restart request is refused (verified via audit log)"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

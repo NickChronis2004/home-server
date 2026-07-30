@@ -1,0 +1,4 @@
+name: protocol_snowfall
+description: "EMERGENCY: Activates system-wide lockdown. Immediately disables all write actions (restart/stop/start container) while keeping read-only diagnostics available. Executes instantly, no confirmation needed - this is a defensive/reversible action. Use when the user asks to activate emergency lockdown, Protocol Snowfall, or says the system may be compromised or misbehaving. Recovery requires direct server access (Protocol Daybreak) and cannot be done through chat."
+privilege_tier: emergency
+parameters: []

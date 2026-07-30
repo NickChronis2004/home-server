@@ -1,0 +1,8 @@
+name: protocol_blackout
+description: "Stops the JARVIS orchestrator process entirely. Requires explicit user confirmation via /confirm before executing. IMPORTANT: when the user asks to activate Protocol Blackout, you must actually invoke this tool call (with confirmed left as default/false) so the confirmation flow can proceed - do not just describe what will happen in a text response. Never set confirmed=true yourself - only the system sets it after the user types /confirm."
+privilege_tier: emergency
+parameters:
+  - name: confirmed
+    type: boolean
+    description: "Leave as false/default. This is set to true automatically by the system after user confirmation, never set it yourself."
+    required: false
