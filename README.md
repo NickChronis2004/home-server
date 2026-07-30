@@ -86,3 +86,19 @@ jarvis/
 - [ ] Docker Policy Broker (reduce direct socket access)
 - [ ] Fix DNS flakiness properly instead of relying on static IP
 - [ ] Backup/rollback system
+
+## Confirm-Required Tools
+
+Tools that change system state require explicit confirmation via a deterministic `/confirm` command — **not** natural language like "yes" or "go ahead". This is intentional: the orchestrator recognizes `/confirm` in code, before the message ever reaches the LLM, so there's no risk of the model misinterpreting ambiguous confirmation language.
+
+Flow:
+1. User requests an action (e.g. "restart jellyfin")
+2. Tool checks policy (protected list, allowlist, cooldown) and writes a pending confirmation record if allowed
+3. Tool returns a "confirmation_required" message; the LLM relays this to the user
+4. User must type exactly `/confirm` (nothing else) within 2 minutes
+5. Orchestrator intercepts `/confirm`, bypasses the LLM entirely, and executes the pending action directly
+
+### `restart_container`
+First confirm-required tool. Restarts an allowlisted Docker container (jellyfin, pihole, samba, uptime-kuma). Vaultwarden and other protected containers are rejected before any confirmation step. Has a 120-second cooldown per container to prevent restart loops.
+
+**Known quirk**: Asking to restart the same container twice within the same chat session may cause GPT to respond based on conversation history instead of actually calling the tool again (no new confirmation gets created). Workaround: start a new chat for a repeat action, or wait for the existing confirmation prompt to naturally resolve first.
