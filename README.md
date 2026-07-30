@@ -58,7 +58,7 @@ jarvis/
 ## Known Issues / Quirks
 
 - **Samba write permissions**: `dperson/samba` image runs as internal `smbuser` (uid 100), not the host user (uid 1000). Fixed with `chmod -R 777 ~/media`. Not ideal long-term but works.
-- **jarvis-orchestrator ↔ Open WebUI DNS flakiness**: Occasional `ClientConnectorDNSError` when connecting via container hostname. Worked around using static IP (`172.26.0.4`) in the Open WebUI connection config instead of the hostname `jarvis-orchestrator`. **Not a permanent fix** — IP may change if the container is recreated. Check with `docker inspect jarvis-orchestrator | grep IPAddress` if the jarvis model stops responding in Open WebUI.
+- **jarvis-orchestrator ↔ Open WebUI DNS flakiness**: Fixed by declaring a static IP (`172.26.0.4`) directly in the Docker Compose network config (`ipv4_address` under `jarvis-ai-net`), instead of relying on hostname resolution. This IP is now permanent and will not change on container recreation.
 - **Open WebUI auto-features**: "Αυτόματη Γενιά Τίτλων" and similar auto-generation features send extra requests to whatever model is selected, which can fail against custom endpoints. Disabled in Admin Panel → Settings → Interface.
 - **Docker socket access**: jarvis-orchestrator has `/var/run/docker.sock` mounted to run `docker` commands. This is a known security tradeoff — see roadmap for planned "policy broker" pattern to reduce this exposure.
 
@@ -84,7 +84,6 @@ jarvis/
 - [ ] Confirm-required tools (e.g. `restart_container`) with allowlists + cooldowns
 - [ ] Central audit log (SQLite)
 - [ ] Docker Policy Broker (reduce direct socket access)
-- [ ] Fix DNS flakiness properly instead of relying on static IP
 - [ ] Backup/rollback system
 
 ## Confirm-Required Tools
