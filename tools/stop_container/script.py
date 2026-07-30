@@ -20,7 +20,14 @@ def set_pending(container_name):
         "created_at": time.time()
     }))
 
+import re
+
+VALID_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]*$')
+
 def run(container_name, confirmed):
+    if not container_name or not VALID_NAME_PATTERN.match(container_name.strip()):
+        return {"error": "Invalid container name format."}
+
     policy = load_policy()
     allowed_targets = policy.get("restart_allowed_targets", [])
     protected = policy.get("protected_containers", [])
