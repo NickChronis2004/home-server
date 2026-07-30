@@ -1,0 +1,12 @@
+name: restart_container
+description: "Restarts a Docker container. This ALWAYS requires explicit user confirmation via the /confirm command before it takes effect. Call this first with confirmed left as default (false) to check if the restart is allowed and request confirmation. Never set confirmed=true yourself - only the system sets it after the user types /confirm."
+privilege_tier: confirm_required
+parameters:
+  - name: container_name
+    type: string
+    description: "The name of the container to restart (e.g. jellyfin, pihole, samba, uptime-kuma)"
+    required: true
+  - name: confirmed
+    type: boolean
+    description: "Leave as false/default. This is set to true automatically by the system after user confirmation, never set it yourself."
+    required: false

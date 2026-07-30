@@ -2,6 +2,7 @@ import os
 import json
 import yaml
 import subprocess
+import time
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -11,13 +12,13 @@ from errors import JarvisError, ToolNotFoundError, ManifestError, ModelProviderE
 
 BASE_DIR = Path("/app/jarvis")
 TOOLS_DIR = BASE_DIR / "tools"
+PENDING_FILE = BASE_DIR / "logs" / ".pending_confirmation.json"
+PENDING_EXPIRY_SECONDS = 120
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 JARVIS_MODEL = os.environ.get("JARVIS_MODEL", "gpt-4o-mini")
 
 app = FastAPI()
-
-# ---- Global exception handlers ----
 
 @app.exception_handler(JarvisError)
 async def handle_jarvis_error(request: Request, exc: JarvisError):
@@ -34,8 +35,6 @@ async def handle_unexpected_error(request: Request, exc: Exception):
         status_code=500,
         content={"error": {"code": "INTERNAL_ERROR", "message": "An internal error occurred.", "retryable": False}}
     )
-
-# ---- Tool discovery ----
 
 def discover_tools():
     tools = {}
@@ -108,6 +107,21 @@ def build_openai_tools_schema(tools):
         })
     return schema
 
+def get_pending_confirmation():
+    if not PENDING_FILE.exists():
+        return None
+    try:
+        data = json.loads(PENDING_FILE.read_text())
+    except json.JSONDecodeError:
+        return None
+    if time.time() - data.get("created_at", 0) > PENDING_EXPIRY_SECONDS:
+        return None
+    return data
+
+def clear_pending_confirmation():
+    if PENDING_FILE.exists():
+        PENDING_FILE.unlink()
+
 @app.get("/v1/models")
 async def list_models():
     return {"object": "list", "data": [{"id": "jarvis", "object": "model", "owned_by": "jarvis"}]}
@@ -116,6 +130,31 @@ async def list_models():
 async def chat_completions(request: dict):
     tools = discover_tools()
     messages = request.get("messages", [])
+
+    last_user_message = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user_message = (m.get("content") or "").strip()
+            break
+
+    if last_user_message == "/confirm":
+        pending = get_pending_confirmation()
+        if not pending:
+            return {
+                "id": "jarvis-response", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "There is no pending action to confirm, or it has expired. Please make a new request first."}, "finish_reason": "stop"}]
+            }
+        clear_pending_confirmation()
+        try:
+            result = execute_tool(pending["tool"], {"container_name": pending["container_name"], "confirmed": "true"}, tools)
+            print(f"[JARVIS] CONFIRMED tool={pending['tool']} target={pending['container_name']} result={result.get('status')}", flush=True)
+            content = f"Done. {json.dumps(result, ensure_ascii=False)}"
+        except JarvisError as e:
+            content = f"The confirmed action failed: {e.message}"
+        return {
+            "id": "jarvis-response", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
+        }
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -153,6 +192,8 @@ async def chat_completions(request: dict):
             except json.JSONDecodeError:
                 fn_args = {}
 
+            fn_args["confirmed"] = "false"
+
             try:
                 tool_result = execute_tool(fn_name, fn_args, tools)
                 success = True
@@ -174,16 +215,14 @@ async def chat_completions(request: dict):
                 result = resp.json()
         except (httpx.TimeoutException, httpx.ConnectError):
             return {
-                "id": "jarvis-response",
-                "object": "chat.completion",
+                "id": "jarvis-response", "object": "chat.completion",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "The action completed, but I couldn't generate a final response. Please check the results directly."}, "finish_reason": "stop"}]
             }
         choices = result.get("choices", [{}])
         message = choices[0].get("message", {}) if choices else {}
 
     return {
-        "id": "jarvis-response",
-        "object": "chat.completion",
+        "id": "jarvis-response", "object": "chat.completion",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": message.get("content", "")}, "finish_reason": "stop"}]
     }
 

@@ -20,3 +20,7 @@ venv/
 # Backups
 *.bak
 *.backup
+
+# Runtime state (not code)
+logs/.pending_confirmation.json
+logs/.restart_cooldowns.json
