@@ -8,6 +8,7 @@ protected_containers:
 
 # Containers allowed as targets for restart-type operations
 restart_allowed_targets:
+  - jarvis-test-target
   - jellyfin
   - pihole
   - uptime-kuma
