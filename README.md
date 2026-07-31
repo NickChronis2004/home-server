@@ -13,9 +13,10 @@ Your home server with a local-first AI assistant. This document is the user guid
 5. [Emergency Protocols](#emergency-protocols)
 6. [Kill Switch](#kill-switch)
 7. [Backup & Restore](#backup--restore)
-8. [Security — What's Protected](#security--whats-protected)
-9. [Common Issues](#common-issues)
-10. [Roadmap](#roadmap)
+8. [Sandbox — Running Code](#sandbox--running-code)
+9. [Security — What's Protected](#security--whats-protected)
+10. [Common Issues](#common-issues)
+11. [Roadmap](#roadmap)
 
 ---
 
@@ -232,6 +233,61 @@ docker volume ls -q | grep test_restore_ | xargs -r docker volume rm
 **Safety net built in**: if something already exists where the restore is about to write (e.g. you're restoring onto an already-working system), the script **first** saves the current content to `~/jarvis-restore-safety-backups/` before overwriting it. Nothing is ever lost silently.
 
 ---
+## Sandbox — Running Code
+
+JARVIS can execute Python code on your behalf, fully isolated from the rest of the server.
+
+**Through JARVIS (chat):**
+
+```
+You: use the sandbox tool to calculate the average of [1,2,3,4,5] with numpy
+JARVIS: [runs it, returns the result]
+```
+
+No confirmation needed — this is deliberate, and explained below.
+
+### What it's for
+
+Calculations, data processing, text manipulation, generating small files, quickly testing a snippet — anything where it's more reliable for JARVIS to actually *run* code than to reason about what it would output.
+
+### How isolated is "isolated"
+
+Every run happens in a brand-new, disposable container, destroyed immediately after (`docker run --rm`). On top of normal Docker isolation, the container runs under **gVisor** (`--runtime=runsc`) — a user-space kernel that adds a real isolation boundary between the executed code and the host's actual kernel, not just process/namespace separation.
+
+Concretely, each run has:
+- **No network access at all** (`--network=none`) — not even DNS resolution works
+- **No access to the host filesystem** — no bind mounts, nothing from `~/media`, no Docker socket, nothing
+- **Read-only root filesystem** — the only writable space is `/tmp` and `/work`, both RAM-backed (`tmpfs`), wiped the moment the container exits
+- **Non-root user** (uid 10001, no shell, no home directory)
+- **All Linux capabilities dropped**, no privilege escalation possible
+- **Resource limits**: 768MB RAM, 1 CPU, max 64 processes, 20-second execution timeout
+
+This was verified with a 15-point security test — confirmed that the sandbox genuinely cannot reach the network, cannot see host files (tested against a canary file placed outside any mount), cannot see the Docker socket, cannot escape the memory/process/time limits, and is genuinely running under gVisor (not silently falling back to a regular container).
+
+### Why no confirmation is required
+
+Every other tool that changes something on the system (restarting a container, running a backup) requires `/confirm`. The sandbox doesn't, and that's intentional: because the container has no network and no access to anything on the host, there's nothing *to* confirm — the blast radius of anything that runs inside is the container itself, which no longer exists a few seconds later.
+
+### Current limitations (v1)
+
+- **Python only** — no Node.js or Bash yet
+- **Fixed set of preinstalled packages**: numpy, pandas, matplotlib, pillow, scipy, sympy, pydantic, requests, beautifulsoup4. No way to install anything else at request time — since the container has no network, `pip install` inside a run would fail anyway
+- **`requests` is installed but non-functional** — the package is there, but network calls will fail with no network access. This is expected, not a bug
+- Output (stdout/stderr) is treated as **untrusted data** by JARVIS — if executed code prints something that looks like an instruction, JARVIS is designed to ignore it rather than act on it
+
+### Rebuilding the sandbox image
+
+If you want to add a package to what's preinstalled, edit `~/jarvis-sandbox-build/Dockerfile` and rebuild:
+
+```
+cd ~/jarvis-sandbox-build
+docker build -t jarvis-python-sandbox:v1 .
+```
+
+No orchestrator restart needed — the next sandbox run just picks up the new image automatically.
+
+---
+
 
 ## Security — What's Protected
 
@@ -284,8 +340,8 @@ The `dperson/samba` image runs as an internal user (uid 100), not the host user.
 Priority order for next steps:
 
 1. ~~Backups (deterministic, script-based)~~ ✅ Done
-2. **Sandbox** — isolated container for running custom Python scripts through JARVIS
-3. Email/daily reports — read-only, based on the audit log
-4. Database editing/rollback — needs its own careful design (likely TOTP-level confirmation, same reasoning as the future reboot/shutdown tools)
+2. ~~Sandbox~~ ✅ Done — isolated gVisor container for running Python code through JARVIS
+3. **Email/daily reports** — read-only, based on the audit log
+4. **Database editing/rollback** — needs its own careful design (likely TOTP-level confirmation, same reasoning as the future reboot/shutdown tools)
 
-Other ideas under consideration: a Docker Policy Broker (to reduce direct docker.sock exposure), a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).
+Other ideas under consideration: a Docker Policy Broker (to reduce direct docker.sock exposure — confirmed during sandbox work that jarvis-orchestrator still has read-write access to the host's Docker socket, meaning gVisor isolation protects executed code from escaping, but does not protect the host from the orchestrator's own tool-call layer; a rootless, separate Docker daemon for sandboxed workloads is the eventual fix), a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).
