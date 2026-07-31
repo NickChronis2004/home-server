@@ -24,3 +24,13 @@ venv/
 # Runtime state (not code)
 logs/.pending_confirmation.json
 logs/.restart_cooldowns.json
+
+# Backup archives (large, contain live service data — never commit)
+jarvis-backups/
+
+# Runtime logs directory (contains audit.db and cooldown state files)
+logs/*.json
+
+# Restore safety copies and test sandboxes (never commit)
+jarvis-restore-safety-backups/
+jarvis-restore-test/

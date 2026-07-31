@@ -101,7 +101,7 @@ def execute_tool(tool_name, arguments, tools):
     try:
         result = subprocess.run(
             ["python3", script_path],
-            capture_output=True, text=True, timeout=30, env=env
+            capture_output=True, text=True, timeout=120, env=env
         )
     except subprocess.TimeoutExpired:
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -196,8 +196,10 @@ async def chat_completions(request: dict):
             }
         clear_pending_confirmation()
         try:
-            result = execute_tool(pending["tool"], {"container_name": pending["container_name"], "confirmed": "true"}, tools)
-            print(f"[JARVIS] CONFIRMED tool={pending['tool']} target={pending['container_name']} result={result.get('status')}", flush=True)
+            confirmed_args = {k: v for k, v in pending.items() if k not in ("tool", "created_at")}
+            confirmed_args["confirmed"] = "true"
+            result = execute_tool(pending["tool"], confirmed_args, tools)
+            print(f"[JARVIS] CONFIRMED tool={pending['tool']} args={confirmed_args} result={result.get('status')}", flush=True)
             content = f"Done. {json.dumps(result, ensure_ascii=False)}"
         except JarvisError as e:
             content = f"The confirmed action failed: {e.message} [audit_id: {e.details.get('audit_id', 'n/a')}]"

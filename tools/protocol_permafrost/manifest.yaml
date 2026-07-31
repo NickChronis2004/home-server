@@ -1,0 +1,8 @@
+name: protocol_permafrost
+description: "Runs a full JARVIS backup (codename PERMAFROST): archives JARVIS config, secrets, logs, and all Docker named volumes, then syncs to the external USB backup disk if it's mounted. This ALWAYS requires explicit user confirmation via the /confirm command before it takes effect, since it can take a couple of minutes and touches disk I/O across every service. Call this first with confirmed left as default (false) to check readiness and request confirmation. Never set confirmed=true yourself - only the system sets it after the user types /confirm."
+privilege_tier: confirm_required
+parameters:
+  - name: confirmed
+    type: boolean
+    description: "Leave as false/default. This is set to true automatically by the system after user confirmation, never set it yourself."
+    required: false
