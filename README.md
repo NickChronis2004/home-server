@@ -209,6 +209,8 @@ Takes 1-2 minutes. 5-minute cooldown before you can run it again.
 - **Retention**: keeps the last 7 backup runs locally, automatically deletes older ones
 - **External USB** (if connected and mounted at `/mnt/backup_external`): automatically synced on every backup run. If not connected, this step is simply skipped without failing the run.
 
+  **Practical note**: sync only happens for backups run *while the USB is plugged in*. If you unplug it between backups, those runs stay local-only and never make it to the USB. If you're relying on the USB copy as your actual disaster-recovery safety net (e.g. "if the server's disk dies"), keep it plugged in permanently, or manually check `/mnt/backup_external/jarvis-backups/` from time to time to confirm it's actually up to date with what's on the server.
+
 ### How to restore
 
 Always via SSH, never through chat (restore is a destructive action on live data — deliberately not exposed to JARVIS yet).
