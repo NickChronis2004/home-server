@@ -19,7 +19,8 @@
 | **`repair_system`** | `clean_docker_disk` (συντηρητικό, 24h filter) + `clean_build_cache` (πλήρες, πάντα ασφαλές) | 2026-08-01, confirm-required. **ΕΝΗΜΕΡΩΣΗ 2026-08-01 (αργότερα την ίδια μέρα): `clean_docker_disk` προσωρινά μη λειτουργικό μετά το Docker Policy Broker Phase 1 — βλ. παρακάτω** |
 | **System prompt** (Open WebUI) | Καθοδηγεί diagnose→propose→confirm workflow | Ήταν κενό πριν, πρώτη φορά μπήκε 2026-08-01 |
 | **README** | Πλήρης user guide (quick access, tools, protocols, backup/restore, security, troubleshooting) | Ενημερώνεται σε κάθε session |
-| **Docker Policy Broker — Phase 1** (proxy layer + mount split) | Ο orchestrator δεν έχει πλέον καθόλου mount `/var/run/docker.sock`. 3 dedicated docker-socket-proxy instances (read/lifecycle/maintenance), κάθε ένα σε δικό του internal Docker network, pinned με digest. Mount split: `policy.yaml`, `tools/`, `lib/`, scripts όλα `:ro`· μόνο `logs/` και `jarvis-backups/` `:rw`. Orchestrator ξεκινά καθαρά, βασική συνομιλία λειτουργική. | 2026-08-01. **Βλ. λεπτομερή ενότητα παρακάτω — μεγάλο, πολυ-session item, ΔΕΝ έχει ολοκληρωθεί πλήρως** |
+| **Docker Policy Broker — Phase 1** (proxy layer + mount split) | Ο orchestrator δεν έχει πλέον καθόλου mount `/var/run/docker.sock`. 3 dedicated docker-socket-proxy instances (read/lifecycle/maintenance), κάθε ένα σε δικό του internal Docker network, pinned με digest. Mount split: `policy.yaml`, `tools/`, `lib/`, scripts όλα `:ro`· μόνο `logs/` και `jarvis-backups/` `:rw`. Orchestrator ξεκινά καθαρά, βασική συνομιλία λειτουργική. | 2026-08-01. Βλ. λεπτομερή ενότητα παρακάτω |
+| **Docker Policy Broker — tools code update** (`DOCKER_HOST` routing) | Νέο `lib/docker_env.py` helper (`docker_env(proxy)` → env dict με σωστό `DOCKER_HOST`). Ενημερώθηκαν: `restart_container`, `stop_container`, `start_container`, `check_docker_status`, `diagnose_system`. Κάθε write ενέργεια → **lifecycle**, κάθε read/inspect/verification → **read**. Όλα standalone-tested (`confirmed=false` και `confirmed=true`), `restart_container` επιπλέον end-to-end tested μέσω chat. | 2026-08-01. **restart/stop/start_container: ✅ ολοκληρωμένα. repair_system, sandbox, protocol_permafrost: εκκρεμούν, βλ. παρακάτω** | |
 
 ---
 
@@ -38,23 +39,28 @@
 - Live tested: όλα τα 3 proxies επιβεβαιώθηκαν standalone (read επιτρέπει ps/μπλοκάρει stop, lifecycle μπλοκάρει ps/επιτρέπει restart, maintenance επιτρέπει system df) πριν συνδεθούν με τον orchestrator. Orchestrator ξεκινά καθαρά (`Uvicorn running on http://0.0.0.0:8001`), βασική συνομιλία μέσω Open WebUI επιβεβαιωμένα λειτουργική.
 - Backup (PERMAFROST, SSH) τρέχτηκε πριν την αλλαγή ως safety net — όλα τα 8 Docker volumes (συμπ. Vaultwarden) OK. Δύο άσχετα, προϋπάρχοντα issues ανακαλύφθηκαν παράλληλα (βλ. "Νέα ευρήματα" παρακάτω), δεν μπλόκαραν τη σημερινή δουλειά.
 
-### ⚠️ ΕΚΚΡΕΜΕΙ — δεν λειτουργούν ακόμα τα docker-calling tools
+### ✅ Ολοκληρώθηκε σήμερα — `lib/docker_env.py` helper + routing σε 5 tools
 
-Ο Python κώδικας των 7 tools (`restart_container`, `stop_container`, `start_container`, `repair_system`, `protocol_permafrost`'s `backup.sh`, `diagnose_system`, `sandbox`) καλεί ακόμα `subprocess.run(["docker", ...])` **χωρίς** να περνάει `DOCKER_HOST` env var. Ο orchestrator πλέον δεν έχει καθόλου `/var/run/docker.sock`, άρα **κάθε tool call που αγγίζει docker θα αποτυγχάνει** μέχρι να γίνει αυτή η ενημέρωση.
+Νέο helper `~/jarvis/lib/docker_env.py`: `docker_env(proxy)` όπου `proxy` ∈ {"read", "lifecycle", "maintenance"}, επιστρέφει `{**os.environ, "DOCKER_HOST": ...}`. Ρίχνει `ValueError`/`RuntimeError` σε άγνωστο proxy name ή λείπον env var, αντί για σιωπηλό fallback. Import pattern: `sys.path.insert(0, "/app/jarvis/lib")` πριν το `from docker_env import docker_env` — **όχι** `from lib.docker_env import ...` (το `lib/` δεν είναι package, δεν έχει `__init__.py`· το flat-import lookup γίνεται μέσω `sys.path.insert`, ίδιο pattern με το προϋπάρχον `redact.py`).
 
-Το compose file ήδη περνάει τα σωστά hostnames στον orchestrator ως env vars, έτοιμα προς χρήση:
-```
-DOCKER_READ_PROXY=tcp://docker-read-proxy:2375
-DOCKER_LIFECYCLE_PROXY=tcp://docker-lifecycle-proxy:2375
-DOCKER_MAINTENANCE_PROXY=tcp://docker-maintenance-proxy:2375
-```
+**Routing ολοκληρωμένο και standalone-tested (`docker exec jarvis-orchestrator sh -c 'TOOL_ARG_...=... python3 .../script.py'`):**
+- `restart_container` — `docker restart` → lifecycle, `docker inspect` → read. **Επιπλέον end-to-end tested μέσω chat + `/confirm`.**
+- `stop_container` — `docker stop` → lifecycle, `docker inspect` → read.
+- `start_container` — `docker start` → lifecycle, `docker inspect` → read. (Πρώτη προσπάθεια είχε ξεχάσει το `env=` στο ίδιο το `docker start` block ενώ το `docker inspect` ήταν ήδη σωστό — εντοπίστηκε από "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" στο standalone test, διορθώθηκε.)
+- `check_docker_status` — `docker ps -a` → read. Χρειάστηκε γιατί το `diagnose_system` το καλεί έμμεσα· χωρίς αυτό το JARVIS "έβλεπε" μηδέν containers.
+- `diagnose_system` — και τα 4 subprocess calls (`docker ps -a`, `docker inspect`, `docker logs`, `docker system df`) → read. Προστέθηκε επίσης explicit error surfacing (`{"error": ...}`) στο `get_containers`/`get_disk_usage` αντί για σιωπηλά κενά αποτελέσματα όταν αποτυγχάνει το subprocess.
 
-**Επόμενο βήμα (επόμενο session): ενημέρωση των 7 tools** ώστε κάθε `subprocess.run(["docker", ...])` να περνάει το σωστό `env={**os.environ, "DOCKER_HOST": ...}` ανάλογα με το ποιο proxy χρειάζεται:
-- `restart_container`, `stop_container`, `start_container` → write ενέργεια στο **lifecycle**, verification (`docker inspect`) στο **read**
-- `diagnose_system` → όλα στο **read**
-- `repair_system`'s `preview_docker_disk_cleanup` (system df) → **read**· `clean_build_cache` (builder prune) → **maintenance**· `clean_docker_disk` παραμένει μπλοκαρισμένο μέχρι να ανοίξει IMAGES/NETWORKS σε μελλοντικό maintenance agent
-- `sandbox` (`docker run`) → **maintenance**
-- `protocol_permafrost`'s `backup.sh` (`docker run -v` per volume) → **maintenance**, μέσω env var περασμένο στο subprocess που καλεί το script
+**Μάθημα από τη σημερινή δουλειά (για τα tools που μένουν):** μετά από κάθε αλλαγή σε αρχείο με πολλαπλά `subprocess.run`, να γίνεται `grep -c 'subprocess.run'` έναντι `grep -c 'env=docker_env'` πριν το standalone test — το `start_container` bug ήταν ακριβώς αυτό, ένα block ξεχάστηκε ενώ το άλλο ήταν σωστό.
+
+**Ακόμα εκκρεμούν:** `repair_system` (3 subprocess calls, read + maintenance), `sandbox` (`docker run` → maintenance), `protocol_permafrost`'s `backup.sh` (`docker run -v` per volume → maintenance). Μέχρι να ολοκληρωθούν, αυτά τα 3 tools θα αποτυγχάνουν αν κληθούν.
+
+### ✅ Νέο εύρημα + fix: confirmation-flow bug στο system prompt (ξεχωριστό από το proxy routing)
+
+Μετά τη διόρθωση του routing, το `restart_container` εξακολουθούσε να μην ενεργοποιείται σωστά μέσω chat — το JARVIS απαντούσε σε φυσική γλώσσα ("γράψε /confirm") **χωρίς να έχει καλέσει το tool** με `confirmed=false`, οπότε δεν υπήρχε ποτέ pending file και το πραγματικό `/confirm` του χρήστη έβγαζε "There is no pending action". Επιβεβαιώθηκε μέσω audit log (`tool_calls` table, στήλες `tool_name`/`confirmed`) — μόνο `diagnose_system` calls, κανένα `restart_container`.
+
+Ρίζα: το system prompt του Open WebUI μοντέλου ("jarvis") έλεγε "πρότεινε ρητά... ζήτα πάντα επιβεβαίωση" χωρίς να διευκρινίζει ότι η ζήτηση επιβεβαίωσης πρέπει να γίνεται **μέσω κλήσης του tool** (`confirmed=false`), όχι με περιγραφή σε φυσική γλώσσα. Διορθώθηκε το system prompt (Workspace → Models → jarvis → Προτροπή Συστήματος): προστέθηκε ρητή οδηγία να καλείται πάντα το tool με `confirmed=false` πρώτα, ποτέ να μην περιγράφεται η ενέργεια αντί να κληθεί το tool. Επιβεβαιώθηκε end-to-end μετά το fix: audit log δείχνει σωστό δίδυμο `confirmed=0` → `confirmed=1`, πραγματικό restart επιτυχές μέσω chat.
+
+**Σημείωση:** ξεχωριστό, μικρότερο side-finding από το ίδιο testing — το JARVIS δεν κάνει καλό fuzzy-matching σε container aliases ("restart Kuma" δεν αναγνωρίστηκε ως "uptime-kuma", το μοντέλο ρώτησε κάτι άλλο αντί να ζητήσει διευκρίνιση ή να προχωρήσει). Δεν διορθώθηκε σήμερα, δεν ήταν στο scope — καταγράφεται για μελλοντικό system-prompt tuning.
 
 ### Γνωστοί, καταγεγραμμένοι περιορισμοί (σκόπιμα όχι λυμένοι σε αυτό το Phase)
 
@@ -83,7 +89,7 @@ DOCKER_MAINTENANCE_PROXY=tcp://docker-maintenance-proxy:2375
 
 Ρίζα του project roadmap (Backups → Sandbox → Email/reports → Database editing), τα δύο πρώτα έγιναν:
 
-1. **Docker Policy Broker Phase 1 — tools code update** (ΝΕΟ, άμεση προτεραιότητα): ενημέρωση των 7 tools ώστε να περνάνε `DOCKER_HOST` προς το σωστό proxy — βλ. λεπτομέρειες παραπάνω. Χωρίς αυτό, diagnose/restart/stop/start/repair/sandbox/permafrost είναι όλα σπασμένα.
+1. **Docker Policy Broker Phase 1 — tools code update, συνέχεια** (άμεση προτεραιότητα): 5 από τα 7 tools ολοκληρώθηκαν (`restart/stop/start_container`, `check_docker_status`, `diagnose_system`) — βλ. λεπτομέρειες παραπάνω. Μένουν: `repair_system` (3 subprocess calls, read + maintenance), `sandbox` (docker run → maintenance), `protocol_permafrost`'s `backup.sh` (docker run -v → maintenance). Μετά από αυτά: negative tests (create/exec μέσω read/lifecycle πρέπει να αποτυγχάνουν) + επιβεβαίωση ότι το Vaultwarden protection παραμένει άθικτο.
 2. **Email/daily reports** — read-only, βασισμένο στο ήδη υπάρχον audit.db. Χαμηλό ρίσκο, immediate value.
 3. **`reconnect_network`** — τρίτο repair_type, μισό σχεδιασμένο (Docker network inspect για containers που δεν επικοινωνούν). Σημείωση: θα χρειαστεί επίσης να αποφασιστεί ποιο proxy το καλύπτει (κανένα από τα 3 σημερινά proxies δεν έχει `NETWORKS=1` ενεργό).
 4. **Database editing/rollback** — χρειάζεται δικό του ασφαλή σχεδιασμό, πιθανώς TOTP-level confirmation

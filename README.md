@@ -307,7 +307,9 @@ No orchestrator restart needed — the next sandbox run just picks up the new im
 ## Common Issues
 
 **"There is no pending action to confirm, or it has expired"**
-More than 2 minutes passed between the request and `/confirm`. Ask for the action again and reply faster.
+Usually: more than 2 minutes passed between the request and `/confirm` — ask again and reply faster.
+
+If this happens *immediately* after JARVIS asked you to type `/confirm` (not a timing issue), it likely means JARVIS described the action in plain language without actually calling the tool first — so no pending confirmation was ever created. This was seen and fixed once already (2026-08-01, system prompt update); if it resurfaces, check the audit log (`logs/audit.db`, `tool_calls` table) to confirm whether the tool was actually called with `confirmed=0` before you typed `/confirm`.
 
 **Restart/backup on the same container/action doesn't work again right away**
 Cooldown in effect (120s for containers, 300s for backup). Wait, or start a new chat.

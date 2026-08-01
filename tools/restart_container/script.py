@@ -5,6 +5,10 @@ import time
 import yaml
 from pathlib import Path
 
+import sys
+sys.path.insert(0, "/app/jarvis/lib")
+from docker_env import docker_env
+
 POLICY_FILE = Path("/app/jarvis/policy.yaml")
 COOLDOWN_FILE = Path("/app/jarvis/logs/.restart_cooldowns.json")
 PENDING_FILE = Path("/app/jarvis/logs/.pending_confirmation.json")
@@ -80,7 +84,8 @@ def run(container_name, confirmed):
 
     result = subprocess.run(
         ["docker", "restart", container_name],
-        capture_output=True, text=True, timeout=30
+        capture_output=True, text=True, timeout=30,
+	env=docker_env("lifecycle"),
     )
     if result.returncode != 0:
         return {"error": f"Restart failed: {result.stderr[:300]}"}
@@ -93,7 +98,8 @@ def run(container_name, confirmed):
     inspect_result = subprocess.run(
         ["docker", "inspect", "--format",
          "{{.State.Status}}|{{.State.StartedAt}}|{{.Id}}", container_name],
-        capture_output=True, text=True, timeout=10
+        capture_output=True, text=True, timeout=10,
+	env=docker_env("read"),
     )
     parts = inspect_result.stdout.strip().split("|")
     new_status = parts[0] if len(parts) > 0 else "unknown"

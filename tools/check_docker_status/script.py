@@ -3,14 +3,18 @@ import json
 import sys
 sys.path.insert(0, "/app/jarvis/lib")
 from redact import redact
+from docker_env import docker_env
 
 PROTECTED_CONTAINERS = ["vaultwarden"]
 
 def run():
     result = subprocess.run(
         ["docker", "ps", "-a", "--format", "{{json .}}"],
-        capture_output=True, text=True
+        capture_output=True, text=True,
+        env=docker_env("read"),
     )
+    if result.returncode != 0:
+        return {"error": f"docker ps failed: {result.stderr[:300]}"}
     containers = [json.loads(line) for line in result.stdout.strip().split("\n") if line]
     output = []
     for c in containers:
