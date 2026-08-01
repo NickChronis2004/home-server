@@ -350,4 +350,13 @@ Priority order for next steps:
 5. **Email/daily reports** — read-only, based on the audit log
 6. **Database editing/rollback** — needs its own careful design (likely TOTP-level confirmation, same reasoning as the future reboot/shutdown tools)
 
+**Parallel security/production-learning track** (added 2026-08-01), priority order:
+
+1. **Docker Policy Broker + rootless Docker** — remove the orchestrator's direct read-write access to `docker.sock`, replace with a narrow intermediary that only allows pre-approved operations
+2. **Trivy** — container image vulnerability scanning (CVEs)
+3. **AIDE / File Integrity Monitoring** — alert if critical files change (`policy.yaml`, `backup.sh`, `.env`)
+4. **Loki + Grafana** — centralized logging across all containers
+
+Deferred until hardware upgrade or different network topology: Wazuh (SIEM/HIDS, RAM-heavy), Suricata/Zeek (needs a span/mirror port), VLAN segmentation (needs a managed switch). See `STATUS.md` for full reasoning and current state of every item on this list.
+
 Other ideas under consideration: a Docker Policy Broker (to reduce direct docker.sock exposure — confirmed during sandbox work that jarvis-orchestrator still has read-write access to the host's Docker socket, meaning gVisor isolation protects executed code from escaping, but does not protect the host from the orchestrator's own tool-call layer; a rootless, separate Docker daemon for sandboxed workloads is the eventual fix), a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).
