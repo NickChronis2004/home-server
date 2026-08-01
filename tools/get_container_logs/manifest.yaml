@@ -1,5 +1,5 @@
 name: get_container_logs
-description: "Shows the most recent log lines from a specific Docker container. Use this to help diagnose issues with a service."
+description: "Shows the most recent log lines from ONE specific, already-identified Docker container. Use this only when you already know which container you need logs from and want the FULL recent log (not just error lines). For a general 'something is wrong, what's going on' investigation across the whole system, use diagnose_system first — it already scans error patterns across all containers and will tell you which one needs a deeper look with this tool."
 privilege_tier: read_only
 parameters:
   - name: container_name

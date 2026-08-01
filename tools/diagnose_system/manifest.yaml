@@ -1,0 +1,4 @@
+name: diagnose_system
+description: "Runs a full health check across all Docker containers: status, health, restart counts, recent error-like log lines, and disk usage breakdown (images/containers/volumes/build-cache). This is PURELY READ-ONLY - it never fixes, cleans, or changes anything, and it takes no confirmation parameter. Use this as the first step whenever the user reports something is wrong, asks 'what's going on', or asks for a general health/status check with no specific action implied. If the user is asking you to actually DO something (clean, fix, restart, free up space), call the appropriate action tool (repair_system, restart_container, etc.) instead - do not call diagnose_system again if you already have recent diagnostic info in this conversation."
+privilege_tier: read_only
+parameters: []

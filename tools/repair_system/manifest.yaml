@@ -1,0 +1,12 @@
+name: repair_system
+description: "Performs an ACTUAL system repair/cleanup action - this is the ONLY tool that makes changes (diagnose_system is read-only and never fixes anything). Use this whenever the user asks to clean, free up, fix, repair, or otherwise take action - words like 'καθάρισε', 'clean', 'fix', 'free up space', 'διόρθωσε' mean call THIS tool, not diagnose_system. This ALWAYS requires explicit user confirmation via the /confirm command before it takes effect. Call this first with confirmed left as default (false) to check what would be affected and request confirmation. Never set confirmed=true yourself - only the system sets it after the user types /confirm. It's fine to call this directly if the user's request is already specific (e.g. 'clean the docker disk') - you don't need to re-run diagnose_system first if you already know what needs fixing."
+privilege_tier: confirm_required
+parameters:
+  - name: repair_type
+    type: string
+    description: "The specific repair action to perform. Supported values: 'clean_docker_disk' - removes dangling (untagged) Docker images, stopped containers older than 24 hours, unused networks, and build cache older than 24 hours. Never touches named volumes or in-use images. Use for general cleanup. 'clean_build_cache' - removes ALL Docker build cache regardless of age (always safe, purely rebuildable layers, only cost is a slower next docker build). Use this specifically when the user wants to free up build cache space right now rather than waiting - it reclaims much more space immediately than clean_docker_disk does if the cache is recent. Neither option ever touches named volumes, running containers, or in-use images."
+    required: true
+  - name: confirmed
+    type: boolean
+    description: "Leave as false/default. This is set to true automatically by the system after user confirmation, never set it yourself."
+    required: false

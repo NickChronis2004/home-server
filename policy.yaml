@@ -18,7 +18,7 @@ restart_allowed_targets:
 confirmation_required:
   - restart_container
   - update_container
-
+  - repair_system
 # Tools that never require confirmation (pure read-only)
 auto_approved:
   - check_docker_status

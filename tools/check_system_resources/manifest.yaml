@@ -1,4 +1,4 @@
 name: check_system_resources
-description: "Shows current CPU and RAM usage on the server"
+description: "Shows current CPU and RAM usage on the server. Note: for container health, disk usage breakdown, or error logs, use diagnose_system instead — this tool only covers CPU/RAM."
 privilege_tier: read_only
 parameters: []

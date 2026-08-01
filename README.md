@@ -71,6 +71,8 @@ Open Open WebUI (`http://100.103.21.5:3000`) and just type normally, in English 
 - "Search for a file called bunny"
 - "What are the largest files on the media drive?"
 - "Restart jellyfin"
+- "Is everything OK with the system?" / "check the docker disk usage"
+- "Clean up the docker disk" / "free up build cache space now"
 - "Run a backup now" / "activate protocol permafrost"
 - "Activate emergency lockdown" / "activate protocol snowfall"
 
@@ -86,6 +88,7 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 
 | Tool | What it does |
 |---|---|
+| `diagnose_system` | Full health check in one call: container status, health, restart counts, recent error-like log lines, and Docker disk usage breakdown. Use this first for anything that sounds like "check if everything's OK" |
 | `check_docker_status` | Which containers are running and their health |
 | `check_disk_space` | Available/used disk space |
 | `check_system_resources` | CPU and RAM usage |
@@ -101,6 +104,7 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 | `restart_container` | Restarts a container | jellyfin, pihole, samba, uptime-kuma |
 | `stop_container` | Stops a container | same list |
 | `start_container` | Starts a stopped container | same list |
+| `repair_system` | Runs a specific pre-approved repair: `clean_docker_disk` (dangling images, stopped containers >24h, unused networks, build cache >24h) or `clean_build_cache` (all build cache, any age — always safe, just slower next `docker build`) | — |
 | `protocol_permafrost` | Full system backup | — (see [Backup & Restore](#backup--restore)) |
 
 **Vaultwarden is never a valid target** for any of these — it doesn't even appear on the allowed-targets list. JARVIS cannot touch it in any way.
@@ -341,7 +345,9 @@ Priority order for next steps:
 
 1. ~~Backups (deterministic, script-based)~~ ✅ Done
 2. ~~Sandbox~~ ✅ Done — isolated gVisor container for running Python code through JARVIS
-3. **Email/daily reports** — read-only, based on the audit log
-4. **Database editing/rollback** — needs its own careful design (likely TOTP-level confirmation, same reasoning as the future reboot/shutdown tools)
+3. ~~Unified diagnostics (`diagnose_system`) and disk cleanup (`repair_system`)~~ ✅ Done
+4. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other (planned repair_system addition, not yet built)
+5. **Email/daily reports** — read-only, based on the audit log
+6. **Database editing/rollback** — needs its own careful design (likely TOTP-level confirmation, same reasoning as the future reboot/shutdown tools)
 
 Other ideas under consideration: a Docker Policy Broker (to reduce direct docker.sock exposure — confirmed during sandbox work that jarvis-orchestrator still has read-write access to the host's Docker socket, meaning gVisor isolation protects executed code from escaping, but does not protect the host from the orchestrator's own tool-call layer; a rootless, separate Docker daemon for sandboxed workloads is the eventual fix), a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).

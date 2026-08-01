@@ -1,4 +1,4 @@
 name: check_docker_status
-description: "Shows which Docker containers are running on the server and their health status"
+description: "Shows which Docker containers are running and their basic status. Use this ONLY for a quick 'is X running' check on a specific known container. For anything broader — general health check, 'what's wrong', investigating an issue, or checking the whole system — use diagnose_system instead, which covers status plus health plus recent errors plus disk usage in one call."
 privilege_tier: read_only
 parameters: []
