@@ -1,0 +1,328 @@
+# ---------------------------------------------------------------------------
+# JARVIS Docker Policy Broker — Phase 1
+#
+# Περιέχει:
+#   1) Τρία στενά docker-socket-proxy instances (read/lifecycle/maintenance),
+#      το καθένα με μόνο τα API sections που πραγματικά χρειάζεται η
+#      αντίστοιχη ομάδα tools.
+#   2) Τον jarvis-orchestrator, πλέον ΧΩΡΙΣ κανένα mount στο πραγματικό
+#      /var/run/docker.sock — μιλάει στο Docker αποκλειστικά μέσω των
+#      3 proxies παραπάνω (DOCKER_HOST env var ανά subprocess call, μέσα
+#      στον Python κώδικα των tools — αυτό είναι ξεχωριστό επόμενο βήμα,
+#      δεν έχει ακόμα ενημερωθεί ο κώδικας των tools σε αυτό το αρχείο).
+#      Επίσης mount split: μόνο logs/ και jarvis-backups/ είναι πλέον
+#      writable· policy.yaml, tools/, lib/, τα scripts είναι :ro — ώστε
+#      ένας compromised orchestrator να μην μπορεί να ξαναγράψει το ίδιο
+#      του το allowlist.
+#
+# Δίκτυο: κάθε proxy έχει το δικό του dedicated internal network,
+# ΧΩΡΙΣ κανένα published host port — μόνο ο orchestrator συνδέεται σε
+# όλα (jarvis-ai-net + τα 3 proxy networks). Έτσι το Open WebUI/Ollama,
+# που είναι επίσης στο jarvis-ai-net, δεν μπορούν να δουν ή να μιλήσουν
+# στα proxies. Η σύνδεση proxy<->docker.sock είναι plain HTTP χωρίς TLS
+# by design του ίδιου του Tecnativa project — άλλος λόγος να μείνει
+# αυστηρά εσωτερικό.
+#
+# ΓΝΩΣΤΟΙ ΠΡΟΣΩΡΙΝΟΙ ΠΕΡΙΟΡΙΣΜΟΙ (καταγεγραμμένοι, όχι λυμένοι εδώ):
+#   - Το lifecycle proxy φιλτράρει σε επίπεδο ενέργειας, ΟΧΙ ανά
+#     container. Το per-container allowlist (πχ Vaultwarden protected)
+#     παραμένει ΜΟΝΟ στο Python policy.yaml layer -- ένας orchestrator
+#     με πλήρες RCE θα μπορούσε θεωρητικά να το παρακάμψει μιλώντας
+#     απευθείας στο proxy. Πραγματική λύση: dedicated lifecycle broker
+#     με δικό του per-container policy (μελλοντικό, μεγαλύτερο project).
+#   - Το maintenance proxy (POST+CONTAINERS=1) είναι το πιο "φαρδύ" από
+#     τα τρία, επειδή docker run (sandbox, permafrost's backup.sh)
+#     πραγματικά χρειάζεται container-create level access. Ένα RCE εδώ
+#     θα μπορούσε θεωρητικά να δημιουργήσει container με host mounts.
+#     Πραγματική λύση: dedicated fixed-function agents (maintenance,
+#     permafrost, sandbox) που δεν εκθέτουν raw Docker API καθόλου
+#     στον orchestrator (μελλοντικό, μεγαλύτερο project -- βλ. STATUS.md).
+#   - clean_docker_disk (repair_system) είναι ΠΡΟΣΩΡΙΝΑ ΜΗ ΛΕΙΤΟΥΡΓΙΚΟ:
+#     χρειάζεται NETWORKS+IMAGES access που σκόπιμα ΔΕΝ ανοίξαμε εδώ.
+#     Θα επιστρέψει μαζί με τον μελλοντικό maintenance agent παραπάνω.
+#     clean_build_cache συνεχίζει να δουλεύει κανονικά (μόνο BUILD=1).
+#
+# ΓΝΩΣΤΟ BACKUP REGRESSION: μετά το mount split, το protocol_permafrost
+# (backup.sh) βλέπει μόνο ό,τι είναι ρητά mounted παρακάτω (tools/,
+# lib/, policy.yaml, scripts, logs/) -- ΟΧΙ πλέον README.md, STATUS.md,
+# docker-compose.proxies.yml, .git/, ή το orchestrator/ source directory.
+# Αποδεκτό εν γνώσει: αυτά τα αρχεία ζουν ήδη στο GitHub repo, δεν
+# χρειάζονται να είναι μέσα στο disaster-recovery tarball.
+# ---------------------------------------------------------------------------
+
+networks:
+  jarvis-ai-net:
+    external: true
+  docker-read-net:
+    internal: true
+  docker-lifecycle-net:
+    internal: true
+  docker-maintenance-net:
+    internal: true
+
+services:
+
+  # -------------------------------------------------------------------
+  # 1) READ-ONLY PROXY
+  #    Χρήση: diagnose_system (ps/inspect/logs/system df),
+  #           verification step του restart/stop/start (μετά την ενέργεια),
+  #           preview_docker_disk_cleanup στο repair_system
+  #    POST=0 -> ολόκληρο το API γίνεται read-only, ανεξάρτητα τι άλλο
+  #    ενεργοποιείται. Αυτό είναι το βασικό safety net αυτού του proxy.
+  #    INFO/EVENTS=0 -- κανένα σημερινό tool δεν τα χρειάζεται, λιγότερο
+  #    surface είναι πάντα καλύτερο όταν δεν κοστίζει functionality.
+  # -------------------------------------------------------------------
+  docker-read-proxy:
+    image: tecnativa/docker-socket-proxy@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    container_name: docker-read-proxy
+    restart: unless-stopped
+    privileged: true  # απαιτείται από το ίδιο το project για να μιλήσει στο socket
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - POST=0
+      - CONTAINERS=1
+      - SYSTEM=1
+      - PING=1
+      - VERSION=1
+      # Ρητά κλειστά -- δεν τα χρειάζεται κανένα σημερινό tool
+      - INFO=0
+      - EVENTS=0
+      # Ρητά κλειστά -- security-critical, ποτέ δεν τα χρειαζόμαστε
+      - AUTH=0
+      - SECRETS=0
+      - BUILD=0
+      - COMMIT=0
+      - CONFIGS=0
+      - DISTRIBUTION=0
+      - EXEC=0
+      - GRPC=0
+      - IMAGES=0
+      - NETWORKS=0
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=0
+      - SESSION=0
+      - SWARM=0
+      - TASKS=0
+      - VOLUMES=0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2375/_ping | grep -qx OK"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - docker-read-net
+    # ΣΚΟΠΙΜΑ ΚΑΝΕΝΑ "ports:" -- μόνο εσωτερική πρόσβαση, και μόνο από
+    # τον orchestrator, μέσω του dedicated docker-read-net.
+
+  # -------------------------------------------------------------------
+  # 2) LIFECYCLE PROXY
+  #    Χρήση: restart_container / stop_container / start_container
+  #           -- ΜΟΝΟ η write ενέργεια. Η verification μετά την ενέργεια
+  #           γίνεται μέσω του read-proxy, όχι εδώ.
+  #    CONTAINERS=0 -- σκόπιμο. Αν το αφήναμε 1, θα άνοιγε ολόκληρο το
+  #    /containers/* namespace με POST=1 (π.χ. containers/create). Με
+  #    CONTAINERS=0 και μόνο τα ALLOW_* ενεργά, επιτρέπονται ΜΟΝΟ αυτά
+  #    τα τρία συγκεκριμένα endpoints.
+  #    ΣΗΜΕΙΩΣΗ: το ALLOW_RESTARTS του upstream project καλύπτει στην
+  #    πραγματικότητα stop|restart|kill, όχι μόνο restart -- ό,τι κι αν
+  #    λέει το όνομά του. Δεν αλλάζει τίποτα στο δικό μας use case (ήδη
+  #    θέλουμε και τα τρία), απλά να το ξέρεις.
+  #    ΓΝΩΣΤΟΣ ΠΕΡΙΟΡΙΣΜΟΣ: αυτό το proxy δεν κάνει per-container
+  #    filtering -- βλ. σημείωση στην κορυφή του αρχείου.
+  # -------------------------------------------------------------------
+  docker-lifecycle-proxy:
+    image: tecnativa/docker-socket-proxy@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    container_name: docker-lifecycle-proxy
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - POST=1
+      - CONTAINERS=0
+      - ALLOW_START=1
+      - ALLOW_STOP=1
+      - ALLOW_RESTARTS=1
+      # ΟΛΑ τα άλλα ρητά κλειστά -- αυτό το proxy κάνει ΜΟΝΟ
+      # start/stop/restart, τίποτα άλλο.
+      - ALLOW_PAUSE=0
+      - ALLOW_UNPAUSE=0
+      - SYSTEM=0
+      - INFO=0
+      - PING=1
+      - VERSION=1
+      - EVENTS=0
+      - AUTH=0
+      - SECRETS=0
+      - BUILD=0
+      - COMMIT=0
+      - CONFIGS=0
+      - DISTRIBUTION=0
+      - EXEC=0
+      - GRPC=0
+      - IMAGES=0
+      - NETWORKS=0
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=0
+      - SESSION=0
+      - SWARM=0
+      - TASKS=0
+      - VOLUMES=0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2375/_ping | grep -qx OK"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - docker-lifecycle-net
+
+  # -------------------------------------------------------------------
+  # 3) MAINTENANCE PROXY
+  #    Χρήση: repair_system's clean_build_cache (builder prune ΜΟΝΟ --
+  #           clean_docker_disk / system prune είναι ΠΡΟΣΩΡΙΝΑ ΜΗ
+  #           ΛΕΙΤΟΥΡΓΙΚΟ, βλ. σημείωση στην κορυφή του αρχείου),
+  #           sandbox (docker run για κάθε code execution),
+  #           protocol_permafrost's backup.sh (docker run -v per volume)
+  #    BUILD=1 -- χρειάζεται για builder prune (clean_build_cache).
+  #    SYSTEM=0, IMAGES=0, NETWORKS=0 -- σκόπιμα κλειστά. Αυτό σημαίνει
+  #    ότι clean_docker_disk (docker system prune) ΘΑ αποτύχει με 403
+  #    αν δοκιμαστεί -- αναμενόμενο, όχι bug. Θα ξανανοίξει όταν φτιαχτεί
+  #    dedicated maintenance agent.
+  #    CONTAINERS=1 παραμένει -- sandbox και permafrost χρειάζονται
+  #    docker run (containers/create). Αυτό είναι το βασικό γνωστό,
+  #    καταγεγραμμένο ρίσκο αυτής της ενδιάμεσης αρχιτεκτονικής.
+  # -------------------------------------------------------------------
+  docker-maintenance-proxy:
+    image: tecnativa/docker-socket-proxy@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    container_name: docker-maintenance-proxy
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - POST=1
+      - CONTAINERS=1
+      - BUILD=1
+      - SYSTEM=0
+      - PING=1
+      - VERSION=1
+      - EVENTS=0
+      - INFO=0
+      # Ρητά κλειστά -- ούτε το maintenance proxy χρειάζεται αυτά
+      - AUTH=0
+      - SECRETS=0
+      - COMMIT=0
+      - CONFIGS=0
+      - DISTRIBUTION=0
+      - EXEC=0
+      - GRPC=0
+      - IMAGES=0
+      - NETWORKS=0
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=0
+      - SESSION=0
+      - SWARM=0
+      - TASKS=0
+      - VOLUMES=0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2375/_ping | grep -qx OK"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - docker-maintenance-net
+
+  # -------------------------------------------------------------------
+  # 4) ORCHESTRATOR
+  #    Το ίδιο image που τρέχει σήμερα (jarvis-orchestrator:latest, ήδη
+  #    χτισμένο τοπικά -- ΔΕΝ χτίζεται από εδώ). Αλλαγές σε σχέση με το
+  #    σημερινό `docker run`:
+  #
+  #    (α) ΚΑΝΕΝΑ mount /var/run/docker.sock -- αφαιρέθηκε εντελώς.
+  #        Ο orchestrator δεν βλέπει πλέον το raw socket καθόλου.
+  #        (Η ίδια η μετάβαση του Python κώδικα των tools ώστε να
+  #        χρησιμοποιεί DOCKER_HOST προς τα 3 proxies είναι ΞΕΧΩΡΙΣΤΟ
+  #        επόμενο βήμα -- μέχρι να γίνει, τα docker calls μέσα στα
+  #        tools θα αποτυγχάνουν, αφού δεν θα βρίσκουν πλέον socket.
+  #        Αυτό είναι αναμενόμενο σε αυτό το ενδιάμεσο στάδιο.)
+  #
+  #    (β) Mount split -- πρώην ένα ενιαίο rw mount ολόκληρου του
+  #        ~/jarvis, τώρα σπασμένο ανά αρχείο/φάκελο. Μόνο logs/ και
+  #        jarvis-backups/ είναι :rw. policy.yaml, tools/, lib/, και
+  #        όλα τα scripts είναι :ro -- ένας compromised orchestrator
+  #        δεν μπορεί πλέον να ξαναγράψει το ίδιο του το allowlist ή
+  #        να τροποποιήσει τον κώδικα των tools.
+  #
+  #        Το orchestrator/ directory (main.py, Dockerfile, κλπ) ΔΕΝ
+  #        χρειάζεται mount καθόλου -- είναι ήδη baked μέσα στο image
+  #        (COPY στο Dockerfile), το bind-mount ήταν πάντα περιττό για
+  #        το runtime, μόνο build-context.
+  #
+  #    (γ) Συνδέεται σε ΟΛΑ τα δίκτυα (jarvis-ai-net + τα 3 proxy
+  #        networks) -- είναι ο μόνος client που χρειάζεται να μιλήσει
+  #        και στα τρία proxies, ενώ το Open WebUI/Ollama παραμένουν
+  #        μόνο στο jarvis-ai-net και δεν βλέπουν καν τα proxies.
+  #
+  #    Port 8001: κρατάμε 127.0.0.1:8001:8001 (περιορισμένο σε localhost
+  #    αντί για 0.0.0.0) -- ΔΕΝ το αφαιρέσαμε εντελώς επειδή δεν είναι
+  #    επιβεβαιωμένο πώς ακριβώς το Open WebUI καλεί σήμερα τον
+  #    orchestrator (πιθανώς μέσω UI-configured connection setting, όχι
+  #    env var). Ασφαλέστερο να μείνει ως έχει λειτουργικά.
+  # -------------------------------------------------------------------
+  jarvis-orchestrator:
+    image: jarvis-orchestrator:latest
+    container_name: jarvis-orchestrator
+    restart: unless-stopped
+    depends_on:
+      docker-read-proxy:
+        condition: service_healthy
+      docker-lifecycle-proxy:
+        condition: service_healthy
+      docker-maintenance-proxy:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - /home/nickchronis2004/jarvis/orchestrator/.env
+    environment:
+      - JARVIS_WRITE_TOOLS_ENABLED=true
+      - TZ=Europe/Athens
+      # Οι τρεις proxy hostnames -- τα tools θα τα διαβάσουν από εδώ
+      # όταν ενημερωθεί ο Python κώδικάς τους (επόμενο βήμα, όχι ακόμα).
+      - DOCKER_READ_PROXY=tcp://docker-read-proxy:2375
+      - DOCKER_LIFECYCLE_PROXY=tcp://docker-lifecycle-proxy:2375
+      - DOCKER_MAINTENANCE_PROXY=tcp://docker-maintenance-proxy:2375
+    volumes:
+      - /home/nickchronis2004/jarvis/tools:/app/jarvis/tools:ro
+      - /home/nickchronis2004/jarvis/lib:/app/jarvis/lib:ro
+      - /home/nickchronis2004/jarvis/policy.yaml:/app/jarvis/policy.yaml:ro
+      # ΔΙΟΡΘΩΣΗ μετά από πραγματικό startup crash: main.py -> init_db()
+      # -> audit.py διαβάζει schema.sql από /app/jarvis/orchestrator/
+      # schema.sql κατά το boot. Δεν είναι baked στο image (το COPY στο
+      # Dockerfile προφανώς δεν το περιλαμβάνει) -- παλιότερα δούλευε
+      # μόνο επειδή το ενιαίο rw mount ολόκληρου του ~/jarvis το εξέθετε
+      # "τυχαία" μαζί με τα πάντα άλλα. Στοχευμένο :ro mount μόνο για
+      # αυτό το ένα αρχείο, όχι ολόκληρο το orchestrator/ directory.
+      - /home/nickchronis2004/jarvis/orchestrator/schema.sql:/app/jarvis/orchestrator/schema.sql:ro
+      - /home/nickchronis2004/jarvis/backup.sh:/app/jarvis/backup.sh:ro
+      - /home/nickchronis2004/jarvis/kill-switch.sh:/app/jarvis/kill-switch.sh:ro
+      - /home/nickchronis2004/jarvis/protocol-snowfall.sh:/app/jarvis/protocol-snowfall.sh:ro
+      - /home/nickchronis2004/jarvis/protocol-blackout.sh:/app/jarvis/protocol-blackout.sh:ro
+      - /home/nickchronis2004/jarvis/protocol-daybreak.sh:/app/jarvis/protocol-daybreak.sh:ro
+      - /home/nickchronis2004/jarvis/smoke_test.sh:/app/jarvis/smoke_test.sh:ro
+      - /home/nickchronis2004/jarvis/logs:/app/jarvis/logs:rw
+      - /home/nickchronis2004/jarvis/jarvis-backups:/app/jarvis/jarvis-backups:rw
+      - /home/nickchronis2004/media:/mnt/media:ro
+      # ΣΚΟΠΙΜΑ ΟΧΙ /var/run/docker.sock -- αυτό είναι όλο το νόημα.
+    networks:
+      - jarvis-ai-net
+      - docker-read-net
+      - docker-lifecycle-net
+      - docker-maintenance-net
