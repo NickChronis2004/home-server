@@ -1,9 +1,13 @@
 import subprocess
 import json
 import os
+import sys
 import time
 import re
 from pathlib import Path
+
+sys.path.insert(0, "/app/jarvis/lib")
+from docker_env import docker_env
 
 # The orchestrator container only has /app/jarvis mounted (bind-mount
 # of the host's ~/jarvis) - it does NOT see the host user's home
@@ -119,6 +123,23 @@ def run(confirmed):
             # (/mnt/backup_external) - that path is set up directly on
             # the host and is the same whether accessed from here or
             # from the host shell.
+            #
+            # backup.sh needs BOTH proxies, for two different operations:
+            #   - discover_volumes() -> `docker volume ls` -> read-only,
+            #     goes through the read proxy
+            #   - backup_volume() -> `docker run -v ...` -> needs
+            #     container-create, goes through the maintenance proxy
+            # A single blanket DOCKER_HOST can't cover both (each proxy
+            # only opens the API sections it actually needs). So we pass
+            # both proxy URLs explicitly; backup.sh picks the right one
+            # per command via `docker -H`. Deliberately NOT reusing
+            # docker_env() here since that helper sets one DOCKER_HOST -
+            # this needs two, side by side. SSH/manual runs of backup.sh
+            # never set these, so they keep using the local socket
+            # exactly as before - this only affects the JARVIS-triggered
+            # path.
+            "DOCKER_READ_PROXY": os.environ["DOCKER_READ_PROXY"],
+            "DOCKER_MAINTENANCE_PROXY": os.environ["DOCKER_MAINTENANCE_PROXY"],
         }
         result = subprocess.run(
             [str(BACKUP_SCRIPT)],

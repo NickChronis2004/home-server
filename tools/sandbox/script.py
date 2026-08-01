@@ -45,6 +45,7 @@ import time
 
 sys.path.insert(0, "/app/jarvis/lib")
 from redact import redact  # noqa: E402  (ίδιο pattern με τα υπόλοιπα tools)
+from docker_env import docker_env  # noqa: E402
 
 # ---- Σταθερές, hardcoded, δεν αλλάζουν από input ----
 
@@ -122,6 +123,7 @@ def run(code):
             input=code.encode("utf-8"),
             capture_output=True,
             timeout=TIMEOUT_SECONDS + RUN_TIMEOUT_BUFFER,
+            env=docker_env("maintenance"),
         )
         stdout_bytes, stderr_bytes = result.stdout, result.stderr
         exit_code = result.returncode

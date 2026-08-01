@@ -104,7 +104,7 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 | `restart_container` | Restarts a container | jellyfin, pihole, samba, uptime-kuma |
 | `stop_container` | Stops a container | same list |
 | `start_container` | Starts a stopped container | same list |
-| `repair_system` | Runs a specific pre-approved repair: `clean_docker_disk` (dangling images, stopped containers >24h, unused networks, build cache >24h) or `clean_build_cache` (all build cache, any age — always safe, just slower next `docker build`) | — |
+| `repair_system` | Runs a specific pre-approved repair: `clean_docker_disk` (dangling images, stopped containers >24h, unused networks, build cache >24h — **currently unavailable**, needs Docker permissions not yet opened, see `STATUS.md`) or `clean_build_cache` (all build cache, any age — always safe, just slower next `docker build`) | — |
 | `protocol_permafrost` | Full system backup | — (see [Backup & Restore](#backup--restore)) |
 
 **Vaultwarden is never a valid target** for any of these — it doesn't even appear on the allowed-targets list. JARVIS cannot touch it in any way.
@@ -295,6 +295,7 @@ No orchestrator restart needed — the next sandbox run just picks up the new im
 
 ## Security — What's Protected
 
+- **No direct Docker socket access.** The orchestrator has no mount of `/var/run/docker.sock`. Instead it talks to three separate, narrowly-scoped `docker-socket-proxy` instances — a **read** proxy (status/logs/disk usage, no writes possible), a **lifecycle** proxy (only start/stop/restart, no read access), and a **maintenance** proxy (for the sandbox and backups, which need to create containers). Each tool only gets the proxy it actually needs.
 - **Vaultwarden is completely off-limits** to every tool, every operation, at every stage — it doesn't even appear on any allowed-targets list. JARVIS cannot touch it in any way.
 - **Confirm-required actions** need an explicit `/confirm` — not natural language, so there's no risk of a misunderstood or accidental confirmation.
 - **Emergency lockdown (SNOWFALL) cannot be undone through chat** — only DAYBREAK with SSH access.
@@ -315,29 +316,21 @@ If this happens *immediately* after JARVIS asked you to type `/confirm` (not a t
 Cooldown in effect (120s for containers, 300s for backup). Wait, or start a new chat.
 
 **Changes to `main.py` don't seem to take effect**
-`main.py` is baked into the Docker image (`COPY` in the Dockerfile) — it needs a full rebuild + recreate, not just `docker restart`:
+`main.py` is baked into the Docker image (`COPY` in the Dockerfile) — it needs a full rebuild + recreate, not just `docker restart`. Since the Docker Policy Broker migration (2026-08-02), the orchestrator no longer mounts `/var/run/docker.sock` directly — it reaches Docker through three dedicated proxies instead (see [Security](#security--whats-protected)). The easiest way to recreate it correctly is via the compose file, which already has the right mounts and env vars:
 ```bash
-cd ~/jarvis/orchestrator
-docker build --no-cache -t jarvis-orchestrator:latest .
-docker stop jarvis-orchestrator && docker rm jarvis-orchestrator
-docker run -d \
-  --name jarvis-orchestrator \
-  --network jarvis-ai-net \
-  --ip 172.26.0.4 \
-  -p 8001:8001 \
-  -v /home/nickchronis2004/media:/mnt/media:ro \
-  -v /home/nickchronis2004/jarvis:/app/jarvis:rw \
-  -v /var/run/docker.sock:/var/run/docker.sock:rw \
-  -e JARVIS_WRITE_TOOLS_ENABLED=true \
-  -e TZ=Europe/Athens \
-  --env-file /home/nickchronis2004/jarvis/orchestrator/.env \
-  --restart unless-stopped \
-  jarvis-orchestrator:latest
+cd ~/jarvis
+docker build --no-cache -t jarvis-orchestrator:latest -f orchestrator/Dockerfile orchestrator/
+docker compose -f docker-compose.proxies.yml up -d --force-recreate jarvis-orchestrator
 ```
-Changes inside `~/jarvis/tools/...` or to `backup.sh` **don't** need a rebuild — they're live-mounted, a plain `docker restart jarvis-orchestrator` is enough.
+Changes inside `~/jarvis/tools/...` or to `backup.sh` **don't** need a rebuild — they're live-mounted (`:ro`), a plain `docker restart jarvis-orchestrator` is enough.
+
+**Note**: `docker compose up -d` alone does not always pick up changed environment variables on an already-running container — if an env var change (e.g. in `docker-compose.proxies.yml`) doesn't seem to apply, use `--force-recreate`, or to be certain, `stop` + `rm` + `up -d` explicitly.
 
 **Samba write permissions**
 The `dperson/samba` image runs as an internal user (uid 100), not the host user. Fix: `chmod -R 777 ~/media` (not ideal long-term, but works).
+
+**Backup step `jarvis-config: FAIL`, or a backup directory that's unexpectedly huge (GBs instead of tens of MB)**
+Fixed 2026-08-02 — was a self-referential tar bug: `backup_config()` archived all of `~/jarvis`, which includes `jarvis-backups/` itself, so it kept trying to include its own still-being-written output file, growing without bound on every failed retry (one instance reached 35GB before being caught). If you ever see this again on an older/restored copy of `backup.sh`, make sure it excludes the backup output directory by name. If a giant leftover backup directory shows up, it's safe to delete (`sudo rm -rf`, since files are owned by root when created via JARVIS) — it's not real data, just the runaway archive.
 
 ---
 
@@ -354,11 +347,11 @@ Priority order for next steps:
 
 **Parallel security/production-learning track** (added 2026-08-01), priority order:
 
-1. **Docker Policy Broker + rootless Docker** — remove the orchestrator's direct read-write access to `docker.sock`, replace with a narrow intermediary that only allows pre-approved operations
+1. ~~**Docker Policy Broker + rootless Docker**~~ ✅ Done (2026-08-01/02) — the orchestrator no longer has any direct access to `docker.sock`. It reaches Docker through three dedicated, narrowly-scoped proxies instead (read-only, lifecycle, maintenance — see [Security](#security--whats-protected)), each only allowing the specific API operations its tools actually need.
 2. **Trivy** — container image vulnerability scanning (CVEs)
 3. **AIDE / File Integrity Monitoring** — alert if critical files change (`policy.yaml`, `backup.sh`, `.env`)
 4. **Loki + Grafana** — centralized logging across all containers
 
 Deferred until hardware upgrade or different network topology: Wazuh (SIEM/HIDS, RAM-heavy), Suricata/Zeek (needs a span/mirror port), VLAN segmentation (needs a managed switch). See `STATUS.md` for full reasoning and current state of every item on this list.
 
-Other ideas under consideration: a Docker Policy Broker (to reduce direct docker.sock exposure — confirmed during sandbox work that jarvis-orchestrator still has read-write access to the host's Docker socket, meaning gVisor isolation protects executed code from escaping, but does not protect the host from the orchestrator's own tool-call layer; a rootless, separate Docker daemon for sandboxed workloads is the eventual fix), a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).
+Other ideas under consideration: a custom broker with sanitized, high-level endpoints instead of category-level Docker API passthrough (bigger future project, see `STATUS.md`), and a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).

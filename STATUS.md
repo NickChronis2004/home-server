@@ -1,6 +1,6 @@
 # JARVIS Project Status
 
-Τελευταία ενημέρωση: 2026-08-01
+Τελευταία ενημέρωση: 2026-08-02
 
 Σκοπός αυτού του αρχείου: μία γρήγορη ματιά για το "τι έχουμε χτίσει, τι μένει, τι έχει αποφασιστεί αλλά όχι υλοποιηθεί" — χωρίς να χρειάζεται να ψάχνουμε παλιά chats. Ενημερώνεται στο τέλος κάθε session μαζί με το README.
 
@@ -20,7 +20,8 @@
 | **System prompt** (Open WebUI) | Καθοδηγεί diagnose→propose→confirm workflow | Ήταν κενό πριν, πρώτη φορά μπήκε 2026-08-01 |
 | **README** | Πλήρης user guide (quick access, tools, protocols, backup/restore, security, troubleshooting) | Ενημερώνεται σε κάθε session |
 | **Docker Policy Broker — Phase 1** (proxy layer + mount split) | Ο orchestrator δεν έχει πλέον καθόλου mount `/var/run/docker.sock`. 3 dedicated docker-socket-proxy instances (read/lifecycle/maintenance), κάθε ένα σε δικό του internal Docker network, pinned με digest. Mount split: `policy.yaml`, `tools/`, `lib/`, scripts όλα `:ro`· μόνο `logs/` και `jarvis-backups/` `:rw`. Orchestrator ξεκινά καθαρά, βασική συνομιλία λειτουργική. | 2026-08-01. Βλ. λεπτομερή ενότητα παρακάτω |
-| **Docker Policy Broker — tools code update** (`DOCKER_HOST` routing) | Νέο `lib/docker_env.py` helper (`docker_env(proxy)` → env dict με σωστό `DOCKER_HOST`). Ενημερώθηκαν: `restart_container`, `stop_container`, `start_container`, `check_docker_status`, `diagnose_system`. Κάθε write ενέργεια → **lifecycle**, κάθε read/inspect/verification → **read**. Όλα standalone-tested (`confirmed=false` και `confirmed=true`), `restart_container` επιπλέον end-to-end tested μέσω chat. | 2026-08-01. **restart/stop/start_container: ✅ ολοκληρωμένα. repair_system, sandbox, protocol_permafrost: εκκρεμούν, βλ. παρακάτω** | |
+| **Docker Policy Broker — tools code update** (`DOCKER_HOST` routing) | Νέο `lib/docker_env.py` helper (`docker_env(proxy)` → env dict με σωστό `DOCKER_HOST`). Routing ολοκληρωμένο σε **όλα τα 7/7 tools**: `restart_container`, `stop_container`, `start_container`, `check_docker_status`, `diagnose_system` (2026-08-01), `repair_system`, `sandbox`, `protocol_permafrost` (2026-08-02). | 2026-08-01/02. **✅ Ολοκληρωμένο πλήρως.** Βλ. λεπτομέρειες παρακάτω |
+| **Docker Policy Broker — negative tests** | Επιβεβαιώθηκε: write μέσω read proxy → 403, read μέσω lifecycle proxy → 403, Vaultwarden ως target σε `restart_container` → απορρίπτεται στο Python policy layer πριν καν φτάσει σε proxy | 2026-08-02 |
 
 ---
 
@@ -52,7 +53,35 @@
 
 **Μάθημα από τη σημερινή δουλειά (για τα tools που μένουν):** μετά από κάθε αλλαγή σε αρχείο με πολλαπλά `subprocess.run`, να γίνεται `grep -c 'subprocess.run'` έναντι `grep -c 'env=docker_env'` πριν το standalone test — το `start_container` bug ήταν ακριβώς αυτό, ένα block ξεχάστηκε ενώ το άλλο ήταν σωστό.
 
-**Ακόμα εκκρεμούν:** `repair_system` (3 subprocess calls, read + maintenance), `sandbox` (`docker run` → maintenance), `protocol_permafrost`'s `backup.sh` (`docker run -v` per volume → maintenance). Μέχρι να ολοκληρωθούν, αυτά τα 3 tools θα αποτυγχάνουν αν κληθούν.
+**2026-08-02: ολοκληρώθηκαν και τα 3 εναπομείναντα tools.** Routing 5/5 subprocess calls σε `repair_system`, 1/1 σε `sandbox`, dual-proxy σε `protocol_permafrost`/`backup.sh`. Λεπτομέρειες παρακάτω.
+
+### ✅ 2026-08-02 — `repair_system` routing + buildx CLI incompatibility (νέο εύρημα)
+
+Routing πρόσθεσε `env=docker_env(...)` σε όλα τα 5 subprocess calls (`preview`/`clean_docker_disk`/`clean_build_cache`, read+maintenance mix). Standalone tested `confirmed=false` και `confirmed=true`.
+
+**`clean_docker_disk`**: παραμένει μπλοκαρισμένο όπως ήδη γνωστό (NETWORKS/IMAGES όχι ανοιχτά, σκόπιμα).
+
+**`clean_build_cache`**: routing μόνο του δεν αρκούσε — `docker builder prune` είναι buildx CLI command, όχι απλό daemon API call. Buildx κρατάει δικό του context state (`~/.docker/buildx/`) που δεν υπάρχει μέσα στον orchestrator· χωρίς αυτό ψάχνει για dedicated BuildKit container (`buildx_buildkit_default`) που δεν υπάρχει ούτε μπορεί να δημιουργηθεί μέσω του στενού maintenance proxy. Δοκιμάστηκαν `docker context create` + `buildx create --driver docker` — σκάει με "additional instances of driver docker cannot be created" (ο `docker` driver επιτρέπεται μόνο μία φορά, buildx-wide, ανεξαρτήτως context name).
+
+**Λύση**: παράκαμψη του buildx CLI εντελώς, απευθείας κλήση του υποκείμενου Docker Engine API endpoint `POST /build/prune` μέσω `urllib` (βλ. `_build_prune_via_api()` στο `repair_system/script.py`). Καλύπτεται πλήρως από το ήδη υπάρχον `BUILD=1, POST=1` στο maintenance proxy, καμία επιπλέον permission δεν χρειάστηκε. Επιβεβαιωμένο standalone: `"status": "success"`, `caches_deleted`, `space_reclaimed_bytes`.
+
+### ✅ 2026-08-02 — `sandbox` routing + gVisor isolation επιβεβαιωμένο μετά το routing
+
+1 subprocess call (`docker run --runtime=runsc ...`) → maintenance proxy. Πριν το routing επιβεβαιώθηκε ρητά ότι το `--runtime=runsc` flag περνάει καθαρά μέσω proxy (δεν κάνει σιωπηλό downgrade σε `runc`) — δοκιμή `/proc/version` μέσα στο container επέστρεψε `Linux version 4.19.0-gvisor ...`, το gVisor fingerprint. Επιβεβαιωμένο ξανά end-to-end μετά το routing, μέσω του πραγματικού tool script.
+
+### ✅ 2026-08-02 — `protocol_permafrost`/`backup.sh` dual-proxy routing
+
+`backup.sh` χρειάζεται **δύο** proxies ταυτόχρονα, όχι έναν: `discover_volumes()` (`docker volume ls`, read-only) → read proxy· `backup_volume()` (`docker run -v` per volume) → maintenance proxy. Ένα μοναδικό global `DOCKER_HOST` δεν αρκεί.
+
+Υλοποίηση: το `backup.sh` πήρε δύο μικρά wrappers, `docker_read()`/`docker_maintenance()` (`docker ${VAR:+-H "$VAR"} "$@"` — no-op fallback σε local socket όταν οι μεταβλητές είναι unset, άρα SSH/manual usage δεν επηρεάζεται καθόλου). Το `protocol_permafrost/script.py` περνάει ρητά `DOCKER_READ_PROXY`/`DOCKER_MAINTENANCE_PROXY` στο env του subprocess (όχι το `docker_env()` helper — αυτό θέτει ένα μοναδικό `DOCKER_HOST`, εδώ χρειάζονταν δύο side-by-side).
+
+Χρειάστηκε επίσης: **`VOLUMES=1` προστέθηκε στο read proxy** (`discover_volumes()` έπαιρνε 403 χωρίς αυτό — δεν υπήρχε καθόλου `VOLUMES` env var πριν, default `0`). Πρώτη προσπάθεια πρόσθεσε `VOLUMES=1` αλλά ξέχασε ότι υπήρχε ήδη `VOLUMES=0` παρακάτω στην ίδια "Ρητά κλειστά" λίστα — το τελευταίο σε YAML list-style environment νικάει, οπότε το compose συνέχιζε να διαβάζει `0` ακόμα και μετά από πλήρες `stop`/`rm`/`up` του proxy. Διορθώθηκε αφαιρώντας το παλιό duplicate. **Μόνο στο read proxy** (`POST=0` ήδη εγγυάται read-only εκεί) — ρητά όχι στο maintenance proxy, ώστε να μη φαρδύνει το ήδη-φαρδύ maintenance scope για κάτι που είναι εννοιολογικά read-only.
+
+### 🔴 2026-08-02 — σοβαρό bug βρέθηκε + διορθώθηκε: self-referential tar στο `backup_config()`
+
+Κατά το πρώτο end-to-end test του νέου permafrost routing, το backup κρεμόταν επ' αόριστον (>10 λεπτά, timeout) χωρίς καμία πρόοδο. Ρίζα: `backup_config()`'s `tar` του `$JARVIS_HOME` **δεν εξαιρούσε το ίδιο το `jarvis-backups/` directory**, το οποίο βρίσκεται μέσα στο `$JARVIS_HOME`. Ο tar σκάναρε αναδρομικά μέσα στο `jarvis-backups/`, έβρισκε προηγούμενα backup run directories (το καθένα με δικό του `jarvis-config.tar.gz`), και προσπαθούσε να συμπεριλάβει το **ίδιο του το output αρχείο** που έγραφε ζωντανά τη στιγμή εκείνη — unbounded self-referential growth, όχι κλασικό zip-bomb αλλά μηχανικά παρόμοιο αποτέλεσμα. Επιβεβαιωμένο στην πράξη: διαδοχικά αποτυχημένα runs μεγάλωναν 7.6GB → 23GB → 35GB, το καθένα καταπίνοντας το προηγούμενο. Δίσκος έφτασε στιγμιαία 129GB χρήση πριν τον καθαρισμό (`sudo rm -rf` στα προβληματικά backup dirs — χρειάστηκε sudo γιατί τα αρχεία ανήκουν σε root, δημιουργημένα μέσα στον orchestrator container).
+
+**Fix**: προστέθηκε `--exclude="${base}/$(basename "$BACKUP_ROOT")"` στο `backup_config()`'s tar command. Επιβεβαιωμένο end-to-end: πλήρες PERMAFROST run ολοκληρώθηκε σε 51 δευτερόλεπτα (ήταν >10 λεπτά/timeout πριν), `jarvis-config: OK`, όλα τα 8 volumes OK (συμπ. vaultwarden), backup directory μέγεθος 974MB (λογικό, ήταν 35GB). **Αυτό το bug επηρέαζε και το SSH-manual usage** του `backup.sh`, όχι μόνο το JARVIS-triggered path — ήταν ήδη καταγεγραμμένο ως άγνωστο `jarvis-config:FAIL` από το 2026-08-01, τώρα βρέθηκε η πλήρης αιτία και διορθώθηκε μόνιμα.
 
 ### ✅ Νέο εύρημα + fix: confirmation-flow bug στο system prompt (ξεχωριστό από το proxy routing)
 
@@ -87,18 +116,18 @@
 
 ## Επόμενο στη σειρά (ήδη αποφασισμένη προτεραιότητα)
 
-Ρίζα του project roadmap (Backups → Sandbox → Email/reports → Database editing), τα δύο πρώτα έγιναν:
+Ρίζα του project roadmap (Backups → Sandbox → Email/reports → Database editing):
 
-1. **Docker Policy Broker Phase 1 — tools code update, συνέχεια** (άμεση προτεραιότητα): 5 από τα 7 tools ολοκληρώθηκαν (`restart/stop/start_container`, `check_docker_status`, `diagnose_system`) — βλ. λεπτομέρειες παραπάνω. Μένουν: `repair_system` (3 subprocess calls, read + maintenance), `sandbox` (docker run → maintenance), `protocol_permafrost`'s `backup.sh` (docker run -v → maintenance). Μετά από αυτά: negative tests (create/exec μέσω read/lifecycle πρέπει να αποτυγχάνουν) + επιβεβαίωση ότι το Vaultwarden protection παραμένει άθικτο.
-2. **Email/daily reports** — read-only, βασισμένο στο ήδη υπάρχον audit.db. Χαμηλό ρίσκο, immediate value.
-3. **`reconnect_network`** — τρίτο repair_type, μισό σχεδιασμένο (Docker network inspect για containers που δεν επικοινωνούν). Σημείωση: θα χρειαστεί επίσης να αποφασιστεί ποιο proxy το καλύπτει (κανένα από τα 3 σημερινά proxies δεν έχει `NETWORKS=1` ενεργό).
+1. ~~Docker Policy Broker Phase 1 — tools code update~~ **✅ Ολοκληρώθηκε πλήρως 2026-08-02** (7/7 tools routed, negative tests περασμένα, Vaultwarden protection επιβεβαιωμένο άθικτο). Βλ. λεπτομέρειες παραπάνω.
+2. **Email/daily reports** — read-only, βασισμένο στο ήδη υπάρχον audit.db. Χαμηλό ρίσκο, immediate value. Ρεαλιστικά ξεχωριστό session (SMTP setup/credentials, scheduling, format design) — όχι quick add-on.
+3. **`reconnect_network`** — τρίτο repair_type, μισό σχεδιασμένο (Docker network inspect για containers που δεν επικοινωνούν). Σημείωση: θα χρειαστεί επίσης να αποφασιστεί ποιο proxy το καλύπτει (κανένα proxy δεν έχει `NETWORKS=1` ενεργό σήμερα).
 4. **Database editing/rollback** — χρειάζεται δικό του ασφαλή σχεδιασμό, πιθανώς TOTP-level confirmation
 
 ## Security/production-learning track
 
 Ξεχωριστό, παράλληλο track — production-grade security patterns για μαθησιακή αξία (offensive/defensive security ενδιαφέρον):
 
-1. **Docker Policy Broker + rootless Docker** — Phase 1 (proxy layer + mount split) **ολοκληρώθηκε 2026-08-01**, βλ. λεπτομερή ενότητα παραπάνω. Tools code update εκκρεμεί (βλ. "Επόμενο στη σειρά" #1). Custom broker/agents παραμένουν μελλοντικό, μεγαλύτερο project.
+1. **Docker Policy Broker + rootless Docker** — Phase 1 (proxy layer + mount split, 2026-08-01) + tools code update (7/7 tools, negative tests, 2026-08-02) **✅ πλήρως ολοκληρωμένο**, βλ. λεπτομερή ενότητα παραπάνω. Custom broker/agents παραμένουν μελλοντικό, μεγαλύτερο project (βλ. "Μελλοντικό — custom broker").
 2. **Trivy** — container vulnerability scanning (CVEs σε images πριν τρέξουν). Χαμηλό effort, θα μπει σαν νέο read-only tool πάνω στο ήδη υπάρχον manifest pattern.
 3. **AIDE / File Integrity Monitoring** — ειδοποίηση αν αλλάξει κρίσιμο αρχείο (`policy.yaml`, `backup.sh`, `.env`). Στοχευμένο, μικρό effort. Σημείωση: μετά το mount split αυτά τα αρχεία είναι πλέον ήδη `:ro` μέσα στον orchestrator, που μειώνει (όχι μηδενίζει) την πρακτική αξία αυτού του item — ο host-side κίνδυνος παραμένει.
 4. **Loki + Grafana** (centralized logging) — μαζεύει logs από όλα τα containers σε ένα σημείο, καλό troubleshooting tool, πιθανώς επικαλύπτεται με το email/reports feature.
@@ -117,16 +146,16 @@
 ## Νέα ευρήματα (2026-08-01, ανεξάρτητα από το Docker Policy Broker)
 
 - **`backup.sh`'s `sync-external` step είναι πολύ αργό σε αυτό το hardware**, όχι κρεμασμένο — ένα πλήρες sync στο εξωτερικό USB (`/mnt/backup_external`, `/dev/sdc1`, ext4) τρέχει στα ~1.6MB/s effective throughput. Ένα 2.8GB αρχείο μόνο του χρειάζεται ~20-30 λεπτά. Δεν είναι bug, είναι hardware bottleneck (πιθανό USB 2.0 ή αργός δίσκος). Αν χρειαστεί ποτέ πιο γρήγορο sync, θα χρειαστεί καλύτερο USB 3.0 setup/δίσκο — όχι script fix.
-- **`backup_config` step (`jarvis-config`) απέτυχε (FAIL) σε πρόσφατο run**, πιθανώς permission-related μετά τη δημιουργία νέων αρχείων (`docker-compose.proxies.yml`) στο `~/jarvis`. Δεν διερευνήθηκε περαιτέρω σήμερα — δεν μπλόκαρε τα volumes (αυτά όλα πέτυχαν κανονικά). **Χρειάζεται έλεγχος σε επόμενο session.**
+- ~~`backup_config` step (`jarvis-config`) απέτυχε (FAIL) σε πρόσφατο run~~ **✅ Διερευνήθηκε και διορθώθηκε 2026-08-02** — δεν ήταν permission issue, ήταν self-referential tar bug (βλ. λεπτομερή ενότητα παραπάνω).
 - **Ασφάλεια credentials**: κατά τη διάρκεια debugging, το `OPENAI_API_KEY` εμφανίστηκε σε καθαρό κείμενο σε chat μέσω `docker inspect ... Config.Env`. Επιβεβαιώθηκε ότι το `.env` δεν είναι committed στο git repo. Συστήθηκε revoke+νέο key ως προφύλαξη (ανεξάρτητα από το αν διέρρευσε αλλού) — **έλεγξε αν έγινε.**
 
 ---
 
 ## Ανοιχτά ερωτήματα / decisions που θα χρειαστούν σε επόμενο session
 
-- Tools code update (DOCKER_HOST per proxy) — βλ. πάνω, άμεση προτεραιότητα
-- Έλεγχος του `jarvis-config` backup FAIL — τι ακριβώς permission issue
-- Ποια ακριβώς Docker API calls χρειάζεται σήμερα κάθε tool (ήδη χαρτογραφήθηκε πλήρως στο σημερινό session — βλ. πίνακα στην αρχή της compose file τεκμηρίωσης)
+- ~~Tools code update~~ ✅ Ολοκληρώθηκε 2026-08-02
+- ~~Έλεγχος του `jarvis-config` backup FAIL~~ ✅ Βρέθηκε η αιτία (self-referential tar) και διορθώθηκε 2026-08-02
+- **Επιβεβαίωση αν έγινε revoke του `OPENAI_API_KEY`** — ανοιχτό από 2026-08-01, ακόμα δεν ελέγχθηκε
 - Αν το Loki/Grafana τελικά αντικαταστήσει ή απλά συμπληρώσει το email/daily reports feature
 - Πότε ρεαλιστικά αξίζει το hardware upgrade (custom build, RTX 2060/3060, €400-600) — π.χ. "όταν θέλουμε να προσθέσουμε Wazuh" θα μπορούσε να είναι το practical trigger point αντί για αόριστο timeline
 - Πότε αξίζει να ξεκινήσει το custom broker/agents project (βλ. "Μελλοντικό — custom broker" παραπάνω) — π.χ. αν αλλάξει το threat model

@@ -1,8 +1,15 @@
 import subprocess
 import json
 import os
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, "/app/jarvis/lib")
+from docker_env import docker_env
+
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 PENDING_FILE = Path("/app/jarvis/logs/.pending_confirmation.json")
 PENDING_EXPIRY_SECONDS = 120
@@ -32,7 +39,7 @@ def preview_docker_disk_cleanup():
     """
     result = subprocess.run(
         ["docker", "system", "df", "--format", "{{json .}}"],
-        capture_output=True, text=True, timeout=15
+        capture_output=True, text=True, timeout=15, env=docker_env("read")
     )
     rows = [json.loads(line) for line in result.stdout.strip().split("\n") if line]
     reclaimable = {row["Type"]: row["Reclaimable"] for row in rows}
@@ -53,14 +60,14 @@ def clean_docker_disk():
     result = subprocess.run(
         ["docker", "system", "prune", "--force",
          "--filter", f"until={STOPPED_CONTAINER_AGE_FILTER}"],
-        capture_output=True, text=True, timeout=60
+        capture_output=True, text=True, timeout=60, env=docker_env("maintenance")
     )
     if result.returncode != 0:
         return {"error": f"Cleanup failed: {result.stderr[:300]}"}
 
     after = subprocess.run(
         ["docker", "system", "df", "--format", "{{json .}}"],
-        capture_output=True, text=True, timeout=15
+        capture_output=True, text=True, timeout=15, env=docker_env("read")
     )
     rows = [json.loads(line) for line in after.stdout.strip().split("\n") if line]
 
@@ -72,6 +79,31 @@ def clean_docker_disk():
     }
 
 
+def _build_prune_via_api():
+    """
+    Calls the Docker Engine API's POST /build/prune directly over the
+    maintenance proxy, instead of `docker builder prune` (buildx CLI).
+    Buildx keeps its own builder-context state (~/.docker/buildx) that
+    doesn't exist inside the orchestrator container, and its default
+    driver resolution expects a dedicated BuildKit container
+    (buildx_buildkit_default) that we don't have and don't want to
+    create just for this. The raw API endpoint does the same prune
+    without any of that - it's exactly what BUILD=1/POST=1 on the
+    maintenance proxy was already scoped for.
+    """
+    host = os.environ.get("DOCKER_MAINTENANCE_PROXY", "").strip()
+    if not host:
+        raise RuntimeError("DOCKER_MAINTENANCE_PROXY is not set.")
+    base_url = "http://" + host[len("tcp://"):] if host.startswith("tcp://") else host.rstrip("/")
+
+    with urlopen(f"{base_url}/version", timeout=10) as r:
+        api_version = json.load(r)["ApiVersion"]
+
+    req = Request(f"{base_url}/v{api_version}/build/prune?all=true", data=b"", method="POST")
+    with urlopen(req, timeout=60) as r:
+        return json.load(r)
+
+
 def clean_build_cache():
     """
     Runs docker builder prune with no age filter - build cache is always
@@ -81,23 +113,25 @@ def clean_build_cache():
     regenerated). This never touches images, containers, volumes, or
     networks - only the builder cache.
     """
-    result = subprocess.run(
-        ["docker", "builder", "prune", "--force", "--all"],
-        capture_output=True, text=True, timeout=60
-    )
-    if result.returncode != 0:
-        return {"error": f"Build cache cleanup failed: {result.stderr[:300]}"}
+    try:
+        prune_result = _build_prune_via_api()
+    except HTTPError as exc:
+        body = exc.read(500).decode("utf-8", errors="replace")
+        return {"error": f"Build cache cleanup failed: HTTP {exc.code}: {body}"}
+    except (URLError, TimeoutError, KeyError, ValueError, RuntimeError) as exc:
+        return {"error": f"Build cache cleanup failed: {exc}"}
 
     after = subprocess.run(
         ["docker", "system", "df", "--format", "{{json .}}"],
-        capture_output=True, text=True, timeout=15
+        capture_output=True, text=True, timeout=15, env=docker_env("read")
     )
     rows = [json.loads(line) for line in after.stdout.strip().split("\n") if line]
 
     return {
         "status": "success",
         "repair_type": "clean_build_cache",
-        "prune_output": result.stdout.strip()[:1000],
+        "caches_deleted": prune_result.get("CachesDeleted") or [],
+        "space_reclaimed_bytes": prune_result.get("SpaceReclaimed", 0),
         "disk_usage_after": rows
     }
 

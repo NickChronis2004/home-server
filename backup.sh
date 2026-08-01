@@ -72,9 +72,27 @@ is_anonymous_volume() {
     [[ "$1" =~ ^[0-9a-f]{64}$ ]]
 }
 
+# 2026-08-02: this orchestrator (when run via JARVIS, not SSH) has no
+# docker.sock mount - it talks to the daemon through dedicated
+# docker-socket-proxy instances instead, one per privilege level.
+# discover_volumes() only needs read-only `volume ls`, backup_volume()
+# needs container-create for its throwaway alpine tar container - two
+# different proxies, so two small wrappers instead of one blanket
+# DOCKER_HOST. When run via plain SSH, DOCKER_READ_PROXY/
+# DOCKER_MAINTENANCE_PROXY are unset, `-H ""` is a no-op, and docker
+# falls back to the local socket exactly as before - no behavior change
+# for manual/cron usage.
+docker_read() {
+    docker ${DOCKER_READ_PROXY:+-H "$DOCKER_READ_PROXY"} "$@"
+}
+
+docker_maintenance() {
+    docker ${DOCKER_MAINTENANCE_PROXY:+-H "$DOCKER_MAINTENANCE_PROXY"} "$@"
+}
+
 discover_volumes() {
     local vol
-    docker volume ls -q | while read -r vol; do
+    docker_read volume ls -q | while read -r vol; do
         is_anonymous_volume "$vol" && continue
         is_excluded "$vol" && continue
         echo "$vol"
@@ -138,10 +156,24 @@ $DRY_RUN && log "(DRY RUN — no changes will be made)"
 backup_config() {
     local base
     base="$(basename "$JARVIS_HOME")"
+    # CRITICAL: must exclude the backup output directory itself, since
+    # it lives inside $JARVIS_HOME. Without this, tar recurses into
+    # jarvis-backups/, finds prior run directories (each containing
+    # their own jarvis-config.tar.gz), and tries to archive its own
+    # still-being-written output file - which grows every read cycle.
+    # Confirmed in practice on 2026-08-02: successive failed runs grew
+    # 7.6GB -> 23GB -> 35GB this way, each one swallowing the last,
+    # never completing (tar reported "file changed as we read it" and
+    # the run hung on gzip at 100% CPU indefinitely). basename here
+    # matches how $BACKUP_ROOT is actually derived elsewhere in this
+    # script - excluding by basename, not full path, since tar's
+    # --exclude matches against the relative path being archived
+    # (rooted at $base, per -C "$(dirname "$JARVIS_HOME")" "$base").
     tar --exclude='__pycache__' \
         --exclude='.pending_confirmation.json' \
         --exclude="orchestrator/.env" \
         --exclude="${base}/logs" \
+        --exclude="${base}/$(basename "$BACKUP_ROOT")" \
         -czf "$RUN_DIR/config/jarvis-config.tar.gz" \
         -C "$(dirname "$JARVIS_HOME")" "$base"
 }
@@ -195,7 +227,7 @@ backup_volume() {
     # RUN_DIR: what THIS process needs to check the resulting file exists
     #          afterward, if ever - stays in this process's own view.
     local docker_host_run_dir="${DOCKER_HOST_BACKUP_ROOT}/backup_${TIMESTAMP}/volumes"
-    docker run --rm \
+    docker_maintenance run --rm \
         -v "${vol}:/data:ro" \
         -v "${docker_host_run_dir}:/backup" \
         alpine:3.20 \
