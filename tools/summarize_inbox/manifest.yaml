@@ -1,0 +1,16 @@
+name: summarize_inbox
+description: "Fetches recent emails from the user's CSD UoC mailbox (read-only) and returns their headers plus short body previews so the model can summarize them. Never modifies mailbox state - the IMAP session is opened in explicit readonly mode at the protocol level. Default mode is 'since' (yesterday) - use 'unseen' only if the user explicitly asks for unread mail specifically, since old unread backlog makes that noisy as a default."
+privilege_tier: read_only
+parameters:
+  - name: mode
+    type: string
+    description: "Either 'since' (default) to fetch mail received on/after since_date, or 'unseen' to fetch all unread messages regardless of date. Prefer 'since' unless the user explicitly asks for unread/unseen mail."
+    required: false
+  - name: since_date
+    type: string
+    description: "Only used when mode='since'. Date to fetch mail from, e.g. '02-Aug-2026' or '2026-08-02'. If omitted, defaults to yesterday."
+    required: false
+  - name: max_messages
+    type: integer
+    description: "Safety cap on how many messages to fetch in one call. Defaults to 50 if omitted."
+    required: false
