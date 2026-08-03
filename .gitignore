@@ -34,3 +34,9 @@ logs/*.json
 # Restore safety copies and test sandboxes (never commit)
 jarvis-restore-safety-backups/
 jarvis-restore-test/
+
+# Integrity check state — machine-specific, changes on every --accept
+.integrity-baseline.json
+
+# Morning digest output — generated daily, not source
+morning-digest/

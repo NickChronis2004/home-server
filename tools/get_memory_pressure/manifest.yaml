@@ -1,0 +1,15 @@
+name: get_memory_pressure
+description: >
+  Reports recent OOM-kill events (kernel-level, last hour) and
+  current memory pressure (PSI) on the host. Use this when a
+  container shows up as "restarted" with no obvious cause in its own
+  logs — if the kernel OOM-killer terminated it, that reason only
+  appears in the host's kernel log, not in Docker's own state or
+  container logs. This is host-OS-level information, distinct from
+  check_system_resources (which reports current CPU/RAM usage, not
+  historical kill events or pressure trends).
+privilege_tier: read_only
+proxy: none  # Not a Docker operation — calls the os-helper host
+             # daemon over HTTP via host.docker.internal. See
+             # Chapter 9 (os-helper) in the blueprint.
+parameters: []

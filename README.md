@@ -17,9 +17,11 @@ Your home server with a local-first AI assistant. This document is the user guid
 9. [Backup & Restore](#backup--restore)
 10. [Sandbox — Running Code](#sandbox--running-code)
 11. [Security — What's Protected](#security--whats-protected)
-12. [Adding a New Tool — Checklist](#adding-a-new-tool--checklist)
-13. [Common Issues](#common-issues)
-14. [Roadmap](#roadmap)
+12. [File Integrity Check](#file-integrity-check)
+13. [Morning Digest](#morning-digest)
+14. [Adding a New Tool — Checklist](#adding-a-new-tool--checklist)
+15. [Common Issues](#common-issues)
+16. [Roadmap](#roadmap)
 
 ---
 
@@ -113,6 +115,8 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 | `get_failed_units` | Host-level (not container-level) systemd services currently in a failed state — see [Host Diagnostics](#host-diagnostics-os-helper) |
 | `get_disk_health` | SMART health per physical drive, plus filesystem usage — see [Host Diagnostics](#host-diagnostics-os-helper) |
 | `get_network_state` | Host network interfaces and default route — see [Host Diagnostics](#host-diagnostics-os-helper) |
+| `get_listening_ports` | TCP ports currently listening on the host, with bind address and exposure (localhost-only / all-interfaces / specific-interface) — see [Host Diagnostics](#host-diagnostics-os-helper) |
+| `get_memory_pressure` | Recent OOM-kill events and current memory pressure (PSI) — explains a container "just restarting" with no obvious cause — see [Host Diagnostics](#host-diagnostics-os-helper) |
 
 ### Confirm-required (need `/confirm`)
 
@@ -146,6 +150,8 @@ Everything above (except `os-helper`'s own three tools) sees the world through D
 - "Any failed services on the host?" → `get_failed_units` — distinct from container health; this is about the host's own systemd services (e.g. if a background system service crashed)
 - "Are my disks healthy?" → `get_disk_health` — SMART status per physical drive, not just free space (which `check_disk_space` already covers). Disk health data refreshes every 5 minutes rather than being queried live — the response tells you how old the data is
 - "What's the network state?" → `get_network_state` — host network interfaces and routing, filtered to just the physically meaningful ones (Docker's internal per-container networking is deliberately excluded — that's a lot of noise you don't usually need)
+- "What's listening on the network?" / "Is anything exposed it shouldn't be?" → `get_listening_ports` — every TCP port currently listening, tagged as localhost-only, all-interfaces, or bound to a specific interface. Process-name attribution isn't included (the daemon runs unprivileged and can't resolve other users' process names) — cross-reference against `docker ps` or `diagnose_system` if a port's owner isn't obvious
+- "Did anything get OOM-killed recently?" / "Why did X restart?" → `get_memory_pressure` — recent kernel OOM-kill events (last hour) plus current memory pressure (PSI). Useful specifically when a container shows up as "restarted" with no cause visible in its own logs — an OOM kill only shows up in the host's kernel log, not in Docker's own state
 
 **Known limitation:** the external USB backup drive doesn't support SMART health checks at all — the USB enclosure's chipset doesn't pass that data through, confirmed on the hardware itself. `get_disk_health` reports this cleanly as an error for that drive rather than pretending it's fine.
 
@@ -357,6 +363,58 @@ No orchestrator restart needed — the next sandbox run just picks up the new im
 
 ---
 
+## File Integrity Check
+
+A standalone SSH-only script — **not** a JARVIS tool, and deliberately not wired into chat. Checks whether `.env` or `policy.yaml` have changed since the last time you confirmed they were in a trusted state.
+
+```bash
+cd ~/jarvis
+python3 integrity_check.py
+```
+
+**Why not a JARVIS tool:** the orchestrator itself is exactly the kind of component this check exists to watch — a tool that could silently accept a changed baseline defeats the point. This only runs by hand (or via the morning digest, see below), never through the orchestrator.
+
+**How it works:**
+- First run creates a baseline (SHA-256 hash + mtime of each watched file), stored at `~/jarvis/.integrity-baseline.json` (permissions locked to 600).
+- Every run after that compares current state against the baseline. If everything matches, it says so and exits cleanly.
+- If something changed, it shows you exactly what (old hash vs new hash, old mtime vs new mtime) and **does not update the baseline** — nothing is silently accepted.
+- If the change was you (e.g. you rotated the API key), review it, then run:
+  ```bash
+  python3 integrity_check.py --accept
+  ```
+  This is the only way the baseline changes after the first run — an explicit, deliberate step, same spirit as JARVIS's own `/confirm` flow, just at the SSH layer.
+
+Currently watches `~/jarvis/orchestrator/.env` and `~/jarvis/policy.yaml`. Add more files by editing the `WATCHED_FILES` list at the top of `integrity_check.py`.
+
+---
+
+## Morning Digest
+
+A daily health summary, written automatically — no need to remember to ask JARVIS how things are doing.
+
+**Where to find it:** `~/jarvis/morning-digest/digest_latest.md` (always the most recent), with a dated copy kept in `~/jarvis/morning-digest/archive/` for history.
+
+**What's in it:**
+- **Backups** — most recent run across both backup locations, its OK/WARN/FAIL status, and a warning if it's been longer than ~30 hours since the last one
+- **Failed systemd units** (host-level, via `os-helper`)
+- **Disk health** — SMART status per drive, filesystem usage with warnings at 75%/90% full
+- **File integrity** — runs `integrity_check.py` and reports clean/changed
+
+**How it runs:** a systemd timer (`jarvis-morning-digest.timer`), daily at 07:00, via a oneshot service running as your own user (not root — the script only needs read access to files you already own, plus a local HTTP call to `os-helper`).
+
+```bash
+systemctl list-timers jarvis-morning-digest.timer --no-pager
+```
+
+**Runs standalone, not through JARVIS or Docker.** Same reasoning as the integrity check: if the orchestrator container is down for any reason, the digest should still be able to tell you that, rather than failing silently along with it. Each section degrades independently — if `os-helper` is unreachable, that section shows a clear error while backups and integrity check (which don't depend on it) still report normally.
+
+To run it manually instead of waiting for the timer:
+```bash
+python3 ~/jarvis/morning_digest.py
+```
+
+---
+
 ## Adding a New Tool — Checklist
 
 A few mistakes have shown up more than once while adding new tools, all from *assuming* something about the environment instead of confirming it first. Run through this before writing a new tool, and you'll skip the debugging loop these caused:
@@ -423,8 +481,10 @@ Priority order for next steps:
 5. ~~Loki + Grafana~~ ✅ Done
 6. ~~`list_recent_backups`~~ ✅ Done
 7. ~~`os-helper` (host OS diagnostics)~~ ✅ Done
-8. **Disk-space proactive alert** — host-side, independent of the AI layer, so it doesn't rely on you remembering to ask
-9. **`os-helper` write actions** — a small, explicitly-allowed set of `systemctl restart <service>` calls, confirm-required, same pattern as container restarts
-10. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other
+8. ~~`get_listening_ports` / `get_memory_pressure`~~ ✅ Done
+9. ~~`.env`/`policy.yaml` integrity check~~ ✅ Done
+10. ~~Morning health digest~~ ✅ Done
+11. **`os-helper` write actions** — a small, explicitly-allowed set of `systemctl restart <service>` calls, confirm-required, same pattern as container restarts
+12. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other
 
 See `STATUS.md` for the full technical history, every bug found and fixed along the way, and the reasoning behind decisions not listed here.

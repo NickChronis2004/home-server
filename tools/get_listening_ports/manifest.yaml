@@ -1,0 +1,18 @@
+name: get_listening_ports
+description: >
+  Lists TCP ports currently listening on the host, with their bind
+  address (localhost-only, all-interfaces, or a specific interface)
+  and state. Use this to check whether something is unexpectedly
+  exposed — e.g. a service bound to 0.0.0.0 instead of 127.0.0.1 or
+  the Tailscale IP. This is host-OS-level information, distinct from
+  Docker container health — use check_docker_status / diagnose_system
+  for container state, and this tool for what's actually bound on
+  the host's own network stack. Process-name attribution is not
+  included (this daemon runs unprivileged and cannot resolve other
+  users' process names) — cross-reference a specific port against
+  docker ps or diagnose_system if the owner is unclear.
+privilege_tier: read_only
+proxy: none  # Not a Docker operation — calls the os-helper host
+             # daemon over HTTP via host.docker.internal. See
+             # Chapter 9 (os-helper) in the blueprint.
+parameters: []

@@ -23,6 +23,9 @@
 | **`list_recent_backups`** | Read-only listing των backup runs — μέγεθος, volumes, USB sync, per-component OK/FAIL/WARN | 2026-08-03 |
 | **`os-helper`** | Host-side systemd daemon, 3 read-only endpoints (failed units, disk health, network state) | 2026-08-03 |
 | **`ufw`** | Ενεργοποιήθηκε στο host, με SSH+os-helper rules | 2026-08-03 |
+| **`get_listening_ports` / `get_memory_pressure`** | 2 νέα read-only `os-helper` endpoints — listening TCP ports (exposure classification), OOM events + PSI memory pressure | 2026-08-03 |
+| **`integrity_check.py`** | Standalone SSH-only script, SHA-256 baseline για `.env`/`policy.yaml`, explicit `--accept` flow — δεν είναι JARVIS tool | 2026-08-03 |
+| **Morning digest** | `morning_digest.py` + `jarvis-morning-digest.timer` (07:00 daily), ενώνει backups+failed_units+disk_health+integrity σε ένα markdown file | 2026-08-03 |
 
 ---
 
@@ -160,6 +163,40 @@ Verification test (curl από το κινητό μέσω Termux, διαφορε
 
 ---
 
+## 🔌📊🔒 `get_listening_ports` / `get_memory_pressure` / integrity check / morning digest — τεχνικές λεπτομέρειες (2026-08-03)
+
+### `get_listening_ports` + `get_memory_pressure`
+
+Ίδιο pattern με τα υπάρχοντα 3 `os-helper` endpoints — προστέθηκαν στο ίδιο `os_helper.py`, ίδιο `ENDPOINTS` dict, τίποτα άλλο δεν άλλαξε στο daemon.
+
+- **`get_listening_ports`**: `ss -H -tln` (χωρίς `-p` — process-name attribution χρειάζεται elevated privileges που το daemon σκόπιμα δεν έχει, `NoNewPrivileges=true`). Κάθε port κατηγοριοποιείται `localhost-only` / `all-interfaces` / `specific-interface` βάσει bind address. IPv4/IPv6 parsing χειρίζεται και τα δύο formats (`0.0.0.0:port`, `[::]:port`).
+- **`get_memory_pressure`**: δύο ανεξάρτητα signals — `journalctl -k --since "1 hour ago"` filtered για "killed process"/"out of memory" (OOM events), και `/proc/pressure/memory` (PSI) για τρέχον pressure. Το PSI reports `not available` αν δεν υποστηρίζεται από το kernel config, αντί να σκάει.
+
+Test στο πραγματικό server: 32 listening ports βρέθηκαν σωστά (SSH, Pi-hole, Samba, Tailscale HTTPS στο port 443 με σωστό `specific-interface` tag, Open WebUI, Grafana, orchestrator, Jellyfin, os-helper, Portainer, Ollama), μηδέν OOM events, μηδενικό memory pressure. Κανένα bug βρέθηκε στο deployment — καθαρό πρώτη φορά.
+
+### `integrity_check.py`
+
+Standalone, **δεν** είναι JARVIS tool — τρέχει μόνο SSH, ποτέ μέσα από τον orchestrator (σκόπιμο: ο orchestrator είναι ακριβώς το component που αυτό το script υπάρχει για να επιβλέπει). SHA-256 hash + mtime για `~/jarvis/orchestrator/.env` και `~/jarvis/policy.yaml`, baseline σε `~/jarvis/.integrity-baseline.json` (permissions 600).
+
+**Design decision:** ποτέ δεν κάνει auto-accept αλλαγής. Πρώτο run φτιάχνει baseline. Κάθε επόμενο run συγκρίνει — αν κάτι άλλαξε, δείχνει ακριβώς τι (old/new hash, old/new mtime) και **δεν** γράφει τίποτα. Μόνο ρητό `--accept` run ενημερώνει το baseline — ίδια λογική με το `/confirm` flow του ίδιου του JARVIS, μεταφερμένη στο SSH layer. Υποστηρίζει και `--json` mode (για το morning digest, βλ. παρακάτω).
+
+Δοκιμάστηκε τοπικά σε 7 σενάρια πριν το deploy (baseline creation, clean check, hash mismatch detection, `--accept` flow, missing-file detection, json output) — κανένα bug βρέθηκε στο πραγματικό deployment.
+
+### Morning digest
+
+`morning_digest.py` — standalone, ίδιο σκεπτικό με το integrity check: δεν περνάει μέσα από τον orchestrator ή Docker, ώστε να δουλεύει ακόμα κι αν ο orchestrator είναι κάτω. Καλεί:
+- Standalone reimplementation της `list_recent_backups` λογικής (forward-only matching κ.λπ., ίδιος κώδικας) — τρέχει **και στα δύο** backup dirs (`~/jarvis-backups/` και `~/jarvis/jarvis-backups/`) και ενώνει τα αποτελέσματα, δείχνει το πιο πρόσφατο run μεταξύ των δύο, με warning αν έχουν περάσει >30 ώρες
+- `os-helper` `/get_failed_units` και `/get_disk_health` απευθείας μέσω `localhost:8787` (όχι μέσω `host.docker.internal` — αυτό το script τρέχει στο host, όχι σε container)
+- `integrity_check.py --json` σαν subprocess
+
+Γράφει markdown σε `~/jarvis/morning-digest/digest_latest.md` (πάντα overwrite) + `archive/digest_<ημερομηνία>.md`. Κάθε section είναι isolated — αν το `os-helper` είναι κάτω, μόνο τα δύο σχετικά sections δείχνουν error, backups+integrity συνεχίζουν κανονικά (επιβεβαιωμένο με τοπικό test, mock server up/down).
+
+**Systemd:** `jarvis-morning-digest.service` (oneshot, τρέχει σαν `nickchronis2004`, **όχι** root — δεν χρειάζεται κανένα privilege) + `jarvis-morning-digest.timer` (`OnCalendar=*-*-* 07:00:00`, `Persistent=true` για catch-up αν το μηχάνημα ήταν off στις 07:00).
+
+**Real-world finding από το πρώτο πραγματικό run:** επιβεβαίωσε ξανά δύο ήδη γνωστά open items — το `secrets(.env):FAIL` στο `backup_2026-08-02_0047`, και πιθανή ένδειξη του καταγεγραμμένου race condition (δύο runs 1 λεπτό διαφορά, το ένα με 0 bytes). Δεν είναι νέα ευρήματα, αλλά επιβεβαιώνουν την αξία του digest — τα βλέπεις χωρίς να ρωτήσεις.
+
+---
+
 ## Γενικό μοτίβο bugs σήμερα (2026-08-03) — άξιζε να καταγραφεί ξεχωριστά
 
 Τρία ξεχωριστά bugs σήμερα (manifest format, `sys.path` depth, `~` expansion) ήταν όλα παραλλαγές του **ίδιου** υποκείμενου λάθους: λανθασμένη υπόθεση για το πώς μοιάζει το filesystem/environment μέσα στον orchestrator container, χωρίς επιβεβαίωση πριν γραφτεί ο κώδικας. Το manifest-format bug μάλιστα ήταν ήδη καταγεγραμμένο από το `summarize_inbox` session και ξανασυνέβη.
@@ -181,18 +218,14 @@ Verification test (curl από το κινητό μέσω Termux, διαφορε
 
 ## Επόμενο στη σειρά (προτεραιότητα)
 
-1. **Disk-space proactive alert** — host-side systemd timer, ανεξάρτητο από AI layer. Το πιο "θα σε γλυτώσει από πρόβλημα" item στη λίστα.
-2. **`os-helper` write set** — allowlisted `systemctl restart <unit>`, confirm-required. Φυσική επέκταση πάνω στο ήδη-χτισμένο read-only daemon.
-3. **`reconnect_network`** — τρίτο repair_type, χρειάζεται πρώτα proxy decision (κανένα proxy δεν έχει `NETWORKS=1` σήμερα).
-4. **Email/daily reports ("morning health digest")** — δεν χρειάζεται απαραίτητα SMTP: μπορεί να είναι systemd timer που τρέχει τα ήδη υπάρχοντα read-only tools (`list_recent_backups`, `get_disk_health`, `get_failed_units`) και γράφει περίληψη κάπου ορατό. Ιδέα προέκυψε 2026-08-03, μετά την τυχαία ανακάλυψη του `.env` FAIL μέσω του `list_recent_backups` — το gap που καλύπτει: κανένα σημερινό tool δεν σε ειδοποιεί proactively, όλα είναι pull (ρωτάς εσύ).
-5. **Database editing/rollback** — χρειάζεται δικό του ασφαλή σχεδιασμό, TOTP-level confirmation. Αξιολογήθηκε ρητά ως **high risk / low reward** στο τρέχον στάδιο — παραμένει χαμηλή προτεραιότητα σκόπιμα, όχι απλά αναβλημένο.
+1. **`os-helper` write set** — allowlisted `systemctl restart <unit>`, confirm-required. Φυσική επέκταση πάνω στο ήδη-χτισμένο read-only daemon.
+2. **`reconnect_network`** — τρίτο repair_type, χρειάζεται πρώτα proxy decision (κανένα proxy δεν έχει `NETWORKS=1` σήμερα).
+3. **Database editing/rollback** — χρειάζεται δικό του ασφαλή σχεδιασμό, TOTP-level confirmation. Αξιολογήθηκε ρητά ως **high risk / low reward** στο τρέχον στάδιο — παραμένει χαμηλή προτεραιότητα σκόπιμα, όχι απλά αναβλημένο.
 
 ### Μικρές `os-helper` επεκτάσεις (καταγεγραμμένες ιδέες, 2026-08-03)
 
-Ίδιο daemon/pattern με το ήδη υπάρχον read-only `os-helper`:
+`get_listening_ports` και `get_memory_pressure` ✅ ολοκληρώθηκαν (2026-08-03, βλ. τεχνική ενότητα παραπάνω). Παραμένουν ιδέες, ίδιο pattern:
 
-- **`get_listening_ports`** (`ss -tlnp`) — ψηλή προτεραιότητα ανάμεσα στις μικρές ιδέες, θα έδειχνε immediate verification για πράγματα σαν το σημερινό `ufw`/port-8787 finding χωρίς χειροκίνητο SSH digging.
-- **`get_memory_pressure`** (OOM killer events, `dmesg | grep -i "killed process"`) — θα εξηγούσε "γιατί έπεσε το X" σε περιπτώσεις που σήμερα φαίνονται απλά σαν "restarted".
 - **`get_recent_boot_history`** (`journalctl --list-boots`) — πότε έγινε reboot/crash.
 - **`get_journal_errors`** (`journalctl -p err -b`) — host-level errors, συμπληρώνει το Loki/Grafana (που βλέπει μόνο container logs).
 
