@@ -243,3 +243,40 @@ os-helper.service [jarvis-oshelper user, NoNewPrivileges=true, μηδενική 
 - **`ufw` είναι inactive στο host** — το firewall rule για port 8787 (os-helper) υπάρχει στη ρύθμιση αλλά δεν επιβάλλεται. Ενεργοποίηση `ufw` σωστά (πρώτα SSH-allow rule, μετά `enable`, μετά verify) είναι ξεχωριστό, μελλοντικό task — ρίσκο να χαθεί SSH access αν γίνει απρόσεκτα, γι' αυτό αναβλήθηκε συνειδητά σήμερα.
 - **`secrets(.env): FAIL` σε πρόσφατο backup run** (`backup_2026-08-02_0047`, εντοπίστηκε μέσω του νέου `list_recent_backups`) — το `.env` δεν βρέθηκε στο αναμενόμενο path (`/app/jarvis/orchestrator/.env`) τη στιγμή εκείνου του run. Άξιζε να τσεκαριστεί ξεχωριστά — αν επαναληφθεί σε επόμενα runs, το πιο πρόσφατο backup δεν θα έχει αντίγραφο των secrets.
 - **Δύο backup runs έτρεξαν πολύ κοντά χρονικά** (`22:03`/`22:04`, 1 Αυγούστου) και ο ένας πάτησε πάνω στα αρχεία του άλλου (`tar: file changed as we read it`, ορατό στο πλήρες `backup.log`) — πιθανό missing lock/mutex ενάντια σε concurrent `protocol_permafrost` runs. Δεν διερευνήθηκε βαθύτερα σήμερα.
+
+
+
+# Ενημέρωση STATUS.md — διόρθωση προηγούμενου "ufw inactive" known limitation
+
+**2026-08-03, αργότερα την ίδια μέρα:** Το `ufw` ενεργοποιήθηκε (`sudo ufw enable`, με προηγηθέν
+verified SSH-allow rule + Termux ως δεύτερο ανεξάρτητο κανάλι πρόσβασης πριν το enable — καμία
+απώλεια πρόσβασης). Status: `active`, `deny (incoming)` default, τα δύο αναμενόμενα rules (`22/tcp`
+από παντού, `8787/tcp` μόνο από `172.16.0.0/12`).
+
+**Εύρημα κατά το verification test:** το `ufw` rule για το port 8787 **δεν εμποδίζει** incoming
+συνδέσεις που έρχονται μέσω του Tailscale interface (`tailscale0`). Επιβεβαιώθηκε: `curl` από άλλη
+Tailscale συσκευή (κινητό, μέσω Termux) πήρε κανονική απάντηση από το `os-helper`, παρόλο που το
+`ufw` rule έλεγε ρητά μόνο `172.16.0.0/12` (Docker range) allowed.
+
+**Αιτία:** Tailscale `ShieldsUp: false` (επιβεβαιωμένο μέσω `tailscale debug prefs`). Το Tailscale
+έχει δικό του netfilter/routing layer (`NetfilterMode: 2`) που διαχειρίζεται incoming tailnet
+κίνηση ανεξάρτητα από το OS-level `ufw` — η κίνηση μέσω `tailscale0` δεν περνάει από το ίδιο
+filtering chain που θα περνούσε "κανονική" εξωτερική κίνηση σε άλλα interfaces.
+
+**Απόφαση: αποδεκτό ως έχει, όχι bug προς διόρθωση.** Το πραγματικό access-control boundary για
+το os-helper (και, βασικά, για κάθε service σε αυτό το host) είναι και παραμένει το Tailscale
+tailnet membership αυτό καθαυτό — μόνο οι 3 δικές μας συσκευές (homeserver, desktop, κινητό)
+μπορούν να το φτάσουν, ίδιο μοντέλο με Jellyfin/Vaultwarden/Portainer/όλα τα υπόλοιπα services
+του stack. Το `ufw` rule παραμένει στη ρύθμιση ως δεύτερο layer defense — θα ενεργοποιούνταν αν
+ποτέ αλλάξει η Tailscale ρύθμιση (π.χ. αν κάποιος ενεργοποιήσει `--accept-routes` από άλλη
+συσκευή, ή αν προστεθεί νέος χρήστης/συσκευή στο tailnet) — απλά δεν είναι το ενεργό layer σήμερα.
+
+Δύο εναλλακτικές αξιολογήθηκαν και απορρίφθηκαν για τώρα:
+- **`tailscale up --shields-up`** — θα έλυνε το πρόβλημα, αλλά είναι global policy change (μπλοκάρει
+  ΟΛΗ την incoming tailnet κίνηση σε αυτό το host, όχι μόνο port 8787) — μεγαλύτερη αλλαγή απ' όσο
+  χρειάζεται για το συγκεκριμένο θέμα, θα επηρέαζε πιθανή μελλοντική χρήση άλλων services.
+- **Tailscale ACLs** (μέσω admin console) — πιο σωστό/στοχευμένο, αλλά χρειάζεται web dashboard
+  access, ξεχωριστό μελλοντικό task αν χρειαστεί ποτέ πιο αυστηρό per-service tailnet policy.
+
+Δεν χρειάζεται περαιτέρω ενέργεια σήμερα — καταγράφεται ρητά ώστε το "ufw ενεργό" να μην παρεξηγηθεί
+μελλοντικά ως "port 8787 προστατευμένο από tailnet-level access", κάτι που δεν είναι.
