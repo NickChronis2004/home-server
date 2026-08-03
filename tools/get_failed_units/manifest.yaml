@@ -1,0 +1,14 @@
+name: get_failed_units
+description: >
+  Lists systemd units currently in a failed state on the host (e.g.
+  Tailscale daemon crashed, a cron-triggered service errored out).
+  This is host-OS-level information, distinct from Docker container
+  health — use check_docker_status / diagnose_system for container
+  state, and this tool for the underlying host's own services.
+privilege_tier: read_only
+proxy: none  # Not a Docker operation — calls the os-helper host
+             # daemon over HTTP via host.docker.internal. See
+             # Chapter 9 (os-helper) in the blueprint for why this is
+             # a separate host-side daemon rather than a fourth
+             # Docker Policy Broker proxy.
+parameters: []

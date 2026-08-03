@@ -284,6 +284,12 @@ services:
     image: jarvis-orchestrator:latest
     container_name: jarvis-orchestrator
     restart: unless-stopped
+    # Χρειάζεται ώστε ο orchestrator να μπορεί να μιλήσει στο os-helper
+    # daemon, που τρέχει σαν systemd service στο host (όχι σε container)
+    # στο port 8787. Χωρίς αυτό, "host.docker.internal" δεν resolve-άρει
+    # καθόλου μέσα στο container σε native Docker Linux setups.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       docker-read-proxy:
         condition: service_healthy

@@ -1,0 +1,14 @@
+name: list_recent_backups
+description: >
+  Lists recent protocol_permafrost backup runs, most recent first.
+  For each run: timestamp, total size, whether it synced to the
+  external USB drive, which Docker volumes it includes, and whether
+  any component (config, secrets, logs, or a specific volume) failed
+  during that run. Read-only never modifies or deletes anything.
+privilege_tier: read_only
+proxy: none
+parameters:
+  - name: limit
+    type: integer
+    required: false
+    description: Maximum number of recent backup runs to return. Default 10 covers more than the 7-run local retention window.

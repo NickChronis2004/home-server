@@ -1,0 +1,12 @@
+name: get_disk_health
+description: >
+  Host-level disk health: SMART overall-health status per physical
+  block device, plus filesystem usage. This is deeper than
+  check_disk_space (which reports free space only) — use this when
+  the question is "is a drive actually failing", not just "how full
+  is the disk".
+privilege_tier: read_only
+proxy: none  # Calls the os-helper host daemon over HTTP, same as
+             # get_failed_units — see that tool's manifest for why
+             # this isn't a Docker Policy Broker proxy call.
+parameters: []

@@ -22,7 +22,9 @@
 | **Docker Policy Broker — Phase 1** (proxy layer + mount split) | Ο orchestrator δεν έχει πλέον καθόλου mount `/var/run/docker.sock`. 3 dedicated docker-socket-proxy instances (read/lifecycle/maintenance), κάθε ένα σε δικό του internal Docker network, pinned με digest. Mount split: `policy.yaml`, `tools/`, `lib/`, scripts όλα `:ro`· μόνο `logs/` και `jarvis-backups/` `:rw`. Orchestrator ξεκινά καθαρά, βασική συνομιλία λειτουργική. | 2026-08-01. Βλ. λεπτομερή ενότητα παρακάτω |
 | **Docker Policy Broker — tools code update** (`DOCKER_HOST` routing) | Νέο `lib/docker_env.py` helper (`docker_env(proxy)` → env dict με σωστό `DOCKER_HOST`). Routing ολοκληρωμένο σε **όλα τα 7/7 tools**: `restart_container`, `stop_container`, `start_container`, `check_docker_status`, `diagnose_system` (2026-08-01), `repair_system`, `sandbox`, `protocol_permafrost` (2026-08-02). | 2026-08-01/02. **✅ Ολοκληρωμένο πλήρως.** Βλ. λεπτομέρειες παρακάτω |
 | **Docker Policy Broker — negative tests** | Επιβεβαιώθηκε: write μέσω read proxy → 403, read μέσω lifecycle proxy → 403, Vaultwarden ως target σε `restart_container` → απορρίπτεται στο Python policy layer πριν καν φτάσει σε proxy | 2026-08-02 |
-
+| **Loki + Grafana** (observability) | Centralized log aggregation. Loki + Promtail (host-level, docker_sd auto-discovery) + Grafana, όλα σε δικό τους isolated `observability-net`. Grafana στο port 3002 (browser UI). | 2026-08-03. Ξεχωριστό directory `~/jarvis-observability/`, δικό του `docker compose up -d` — δεν αγγίζει τίποτα από τον orchestrator/proxies. |
+| **`list_recent_backups`** | Read-only, listing των `protocol_permafrost` runs: μέγεθος, volumes, USB sync status, per-component OK/FAIL/WARN από `backup.log`. | 2026-08-03. Proxy: κανένα (pure filesystem read, ίδιο σκεπτικό με `check_disk_space`). |
+| **`os-helper`** (host-side daemon, νέα κατηγορία) | Νέος, 4ος broker — αλλά **εκτός** Docker Policy Broker family: systemd service στο host (όχι container), εκθέτει 3 read-only endpoints (`get_failed_units`, `get_disk_health`, `get_network_state`) μέσω HTTP, καλείται από τον orchestrator μέσω `host.docker.internal`. | 2026-08-03. Βλ. λεπτομερή ενότητα παρακάτω. |
 ---
 
 ## 🔧 Docker Policy Broker — λεπτομέρειες (ενεργό, πολυ-session project)
@@ -186,3 +188,58 @@ Routing πρόσθεσε `env=docker_env(...)` σε όλα τα 5 subprocess cal
 **Παρατηρήθηκε, όχι διορθωμένο:** το system prompt περνάει `confirmed=false` σαν param ακόμα και σε αυτό το read-only tool (κατάλοιπο από το γενικό confirm-flow instruction για write-tools). Δεν σπάει τίποτα — το tool code αγνοεί άγνωστα args — αλλά ίσως αξίζει μελλοντικό system-prompt tuning ώστε να μην περνάει `confirmed` σε read-only tools καθόλου.
 
 **Δεν υλοποιήθηκε (συνειδητή απόφαση):** αρχικό σχέδιο περιλάμβανε cron-triggered daily run + Open WebUI message-posting integration για αυτόματη πρωινή σύνοψη. Αποφασίστηκε να μείνει καθαρά **on-demand μέσω chat** — απλούστερο, καμία επιπλέον υποδομή (κανένα cron, καμία ανάγκη να ψάξουμε το Open WebUI message-posting API).
+
+
+---
+ 
+# Νέα λεπτομερής ενότητα: `os-helper` (2026-08-03)
+ 
+## Σκοπός
+ 
+Πρώτο host-OS-level tooling του JARVIS — μέχρι σήμερα όλα τα tools έβλεπαν τον κόσμο μόνο μέσα από Docker (containers/volumes/images). Το `os-helper` καλύπτει ερωτήσεις που κανένας Docker proxy δεν μπορεί να απαντήσει: failed systemd units, SMART δίσκου, host network interfaces.
+ 
+## Αρχιτεκτονική
+ 
+Ξεχωριστό systemd service στο host (`os-helper.service`, Python stdlib `http.server`, port 8787), **όχι** container — απόφαση βασισμένη στο ότι `systemctl --failed` χρειάζεται πρόσβαση στο systemd D-Bus socket του host, το οποίο μέσα από container θα σήμαινε `--pid=host` ή αντίστοιχο mount που ουσιαστικά σπάει το container isolation μοντέλο. Ο orchestrator μιλάει στο daemon μέσω `host.docker.internal:8787` (`extra_hosts: host.docker.internal:host-gateway` στο `docker-compose.proxies.yml`).
+ 
+**Privilege separation για SMART data (σημαντική αρχιτεκτονική απόφαση):**
+Αρχικό σχέδιο ήταν `sudo smartctl` μέσα από το `os-helper.service` — απέτυχε, γιατί το `NoNewPrivileges=true` (ήδη ενεργό hardening directive) απενεργοποιεί **και** sudo **και** file capabilities (`setcap`) κατά το `execve()`, ανεξαρτήτως. Τελική λύση: πλήρης privilege separation σε **δεύτερο, ξεχωριστό systemd component**:
+ 
+```
+jarvis-smart-snapshot.timer (κάθε 5 λεπτά)
+        ↓
+jarvis-smart-snapshot.service [root, oneshot, hardcoded device list, καμία network exposure]
+        ↓ atomic write
+/run/jarvis-os-helper/smart-health.json
+        ↑ read-only
+os-helper.service [jarvis-oshelper user, NoNewPrivileges=true, μηδενική δυνατότητα escalation]
+```
+ 
+Το `os-helper.service` **ποτέ** δεν καλεί `smartctl` απευθείας — μόνο διαβάζει το snapshot file. `get_disk_health` reports `age_seconds`/`stale` ώστε η 5-λεπτη καθυστέρηση να είναι ρητή, όχι κρυφή.
+ 
+**Firewall:** rule προστέθηκε (`ufw allow from 172.16.0.0/12 to any port 8787 proto tcp` — ευρύ private range επειδή ο orchestrator βρέθηκε συνδεδεμένος σε **4 διαφορετικά** `/16` subnets ταυτόχρονα, jarvis-ai-net + 3 proxy networks). ⚠️ **Δεν επιβάλλεται ακόμα** — `ufw` βρέθηκε global `inactive` στο host. Access control σήμερα = Tailscale-only, ίδιο με τα υπόλοιπα services. Βλ. "Ανοιχτά" παρακάτω.
+ 
+## Bugs βρέθηκαν + διορθώθηκαν
+ 
+1. **Manifest schema mismatch** (ίδιο pattern bug με το `summarize_inbox` προηγουμένως, ξαναβρέθηκε): `tier` → έπρεπε `privilege_tier`, `parameters: {}` → έπρεπε `parameters: []` (λίστα, όχι dict, ακόμα και όταν άδειο). Έσκαγε στο ίδιο `AttributeError: 'str' object has no attribute 'get'` στο `main.py`'s `build_openai_tools_schema()`. **4 tools επηρεάστηκαν** (τα 3 νέα os-helper tools + το `list_recent_backups`), όχι μόνο ένα — άξιζε να ξαναγραφτεί εδώ γιατί ξαναέπεσα στο ίδιο λάθος format παρόλο που ήταν ήδη καταγεγραμμένο.
+2. **`sys.path.insert` λάθος directory depth.** Υπέθεσα `lib/` μέσα στο `tools/` (`../lib`), πραγματικό layout είναι `lib/` αδερφός του `tools/` (`../../lib`) — `/app/jarvis/{tools/,lib/}`, δύο ξεχωριστά mounts στο compose, όχι ένα εμφωλευμένο. `ModuleNotFoundError: No module named 'os_helper_client'` σε production, παρόλο που τοπικό testing (λάθος directory assumption) δεν το έπιασε.
+3. **`~` resolve-άρει σε `/root` μέσα στον orchestrator, όχι στο SSH home directory.** Το `list_recent_backups` script έκανε `os.path.expanduser("~/jarvis/jarvis-backups")` — δούλευε σε standalone SSH test (`~` = `/home/nickchronis2004`), αλλά μέσα στον container ο process τρέχει σαν root, `~` = `/root`, path που δεν υπάρχει. Fix: hardcoded `/app/jarvis/jarvis-backups` (ήδη γνωστό, σταθερό container path από το compose mount), αντί για κάτι που εξαρτάται από ποιος τρέχει το process.
+4. **`docker restart` δεν φτάνει για compose-level αλλαγές.** Το `extra_hosts` directive χρειάστηκε πλήρες `docker compose up -d --force-recreate jarvis-orchestrator` — ίδιο, ήδη καταγεγραμμένο μάθημα από το `summarize_inbox` session (`.env` changes), επιβεβαιώθηκε ότι ισχύει γενικά για οποιαδήποτε compose-level (όχι μόνο env) αλλαγή.
+## Known limitation (hardware, όχι bug)
+ 
+Το εξωτερικό USB backup drive (`/dev/sdc`) δεν υποστηρίζει SMART passthrough μέσω του συγκεκριμένου USB-bridge chipset του (Genesys Logic, VID:PID `0x05e3:0x0749`) — επιβεβαιωμένο με `smartctl --scan-open` (δεν βρίσκει το device κάτω από κανένα `-d` type). `get_disk_health` reports καθαρό error για αυτό το device, όχι false-healthy. Δύο επιπλέον `/dev/sda`/`/dev/sdb` slots (USB card-reader, συνήθως άδειο) αναγνωρίζονται σωστά σαν "no medium present", όχι σαν error.
+ 
+## Deployment
+ 
+- **Host-side** (`os-helper.service`, `jarvis-smart-snapshot.service`/`.timer`): εγκαταστάθηκαν σε `/opt/jarvis/os-helper/`, dedicated unprivileged user `jarvis-oshelper` για το κύριο daemon, root μόνο για τον snapshot collector.
+- **JARVIS-side tools** (`get_failed_units`, `get_disk_health`, `get_network_state`): standard `~/jarvis/tools/<name>/{manifest.yaml,script.py}` pattern, νέο shared `~/jarvis/lib/os_helper_client.py`.
+- End-to-end tested μέσω chat (Open WebUI) — και τα 3 tools + το `list_recent_backups` επιβεβαιωμένα λειτουργικά, σωστά, δομημένα αποτελέσματα.
+---
+ 
+# Ενημέρωση "Ανοιχτά ερωτήματα / decisions"
+ 
+Προσθήκη νέων items:
+ 
+- **`ufw` είναι inactive στο host** — το firewall rule για port 8787 (os-helper) υπάρχει στη ρύθμιση αλλά δεν επιβάλλεται. Ενεργοποίηση `ufw` σωστά (πρώτα SSH-allow rule, μετά `enable`, μετά verify) είναι ξεχωριστό, μελλοντικό task — ρίσκο να χαθεί SSH access αν γίνει απρόσεκτα, γι' αυτό αναβλήθηκε συνειδητά σήμερα.
+- **`secrets(.env): FAIL` σε πρόσφατο backup run** (`backup_2026-08-02_0047`, εντοπίστηκε μέσω του νέου `list_recent_backups`) — το `.env` δεν βρέθηκε στο αναμενόμενο path (`/app/jarvis/orchestrator/.env`) τη στιγμή εκείνου του run. Άξιζε να τσεκαριστεί ξεχωριστά — αν επαναληφθεί σε επόμενα runs, το πιο πρόσφατο backup δεν θα έχει αντίγραφο των secrets.
+- **Δύο backup runs έτρεξαν πολύ κοντά χρονικά** (`22:03`/`22:04`, 1 Αυγούστου) και ο ένας πάτησε πάνω στα αρχεία του άλλου (`tar: file changed as we read it`, ορατό στο πλήρες `backup.log`) — πιθανό missing lock/mutex ενάντια σε concurrent `protocol_permafrost` runs. Δεν διερευνήθηκε βαθύτερα σήμερα.

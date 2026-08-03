@@ -1,0 +1,11 @@
+name: get_network_state
+description: >
+  Host-level network state: network interface status (up/down) and
+  the default route. This is about the host's own networking, not
+  Docker's — for container-to-container network issues, that's the
+  planned reconnect_network repair operation instead.
+privilege_tier: read_only
+proxy: none  # Calls the os-helper host daemon over HTTP, same as
+             # get_failed_units — see that tool's manifest for why
+             # this isn't a Docker Policy Broker proxy call.
+parameters: []
