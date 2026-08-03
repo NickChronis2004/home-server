@@ -1,6 +1,6 @@
 # JARVIS Project Status
 
-Τελευταία ενημέρωση: 2026-08-02
+Τελευταία ενημέρωση: 2026-08-03
 
 Σκοπός αυτού του αρχείου: μία γρήγορη ματιά για το "τι έχουμε χτίσει, τι μένει, τι έχει αποφασιστεί αλλά όχι υλοποιηθεί" — χωρίς να χρειάζεται να ψάχνουμε παλιά chats. Ενημερώνεται στο τέλος κάθε session μαζί με το README.
 
@@ -8,203 +8,107 @@
 
 ## Ολοκληρωμένα
 
-| Feature | Τι κάνει | Σημειώσεις |
+| Feature | Τι κάνει | Ημερομηνία |
 |---|---|---|
-| **Core orchestrator** | FastAPI service, tool discovery από manifests, confirm-flow, audit logging (SQLite) | Θεμέλιο όλων των υπολοίπων |
-| **Emergency protocols** (SNOWFALL / BLACKOUT / DAYBREAK) | SNOWFALL: instant soft lockdown (κόβει writes) μέσω chat. BLACKOUT: hard stop του orchestrator, μόνο SSH+`/confirm`. DAYBREAK: recovery, μόνο SSH, ποτέ μέσω chat | DAYBREAK σκόπιμα ποτέ μέσω chat — recovery δεν πρέπει να περνάει από το ίδιο κανάλι που πιθανώς προκάλεσε το πρόβλημα |
-| **Kill switch** | Σταματά μόνο Ollama + Open WebUI, όχι τον orchestrator | Πιο ήπιο από BLACKOUT |
-| **Backups** (`protocol_permafrost`) | `backup.sh`/`restore.sh`, auto-discovery Docker volumes, 7-run retention, external USB sync, `--test` sandbox mode στο restore | Πλήρως tested, safety-net πριν από κάθε overwrite |
-| **Sandbox** (gVisor) | Python code execution, πλήρως απομονωμένο (no network, no host fs, tmpfs only) | 15-point security test passed, καμία confirmation δεν χρειάζεται (μηδενικό blast radius) |
-| **`diagnose_system`** | Read-only, πλήρης εικόνα: container status/health/restarts, error-pattern log scan, disk usage breakdown | 2026-08-01 |
-| **`repair_system`** | `clean_docker_disk` (συντηρητικό, 24h filter) + `clean_build_cache` (πλήρες, πάντα ασφαλές) | 2026-08-01, confirm-required. **ΕΝΗΜΕΡΩΣΗ 2026-08-01 (αργότερα την ίδια μέρα): `clean_docker_disk` προσωρινά μη λειτουργικό μετά το Docker Policy Broker Phase 1 — βλ. παρακάτω** |
-| **System prompt** (Open WebUI) | Καθοδηγεί diagnose→propose→confirm workflow | Ήταν κενό πριν, πρώτη φορά μπήκε 2026-08-01 |
-| **README** | Πλήρης user guide (quick access, tools, protocols, backup/restore, security, troubleshooting) | Ενημερώνεται σε κάθε session |
-| **Docker Policy Broker — Phase 1** (proxy layer + mount split) | Ο orchestrator δεν έχει πλέον καθόλου mount `/var/run/docker.sock`. 3 dedicated docker-socket-proxy instances (read/lifecycle/maintenance), κάθε ένα σε δικό του internal Docker network, pinned με digest. Mount split: `policy.yaml`, `tools/`, `lib/`, scripts όλα `:ro`· μόνο `logs/` και `jarvis-backups/` `:rw`. Orchestrator ξεκινά καθαρά, βασική συνομιλία λειτουργική. | 2026-08-01. Βλ. λεπτομερή ενότητα παρακάτω |
-| **Docker Policy Broker — tools code update** (`DOCKER_HOST` routing) | Νέο `lib/docker_env.py` helper (`docker_env(proxy)` → env dict με σωστό `DOCKER_HOST`). Routing ολοκληρωμένο σε **όλα τα 7/7 tools**: `restart_container`, `stop_container`, `start_container`, `check_docker_status`, `diagnose_system` (2026-08-01), `repair_system`, `sandbox`, `protocol_permafrost` (2026-08-02). | 2026-08-01/02. **✅ Ολοκληρωμένο πλήρως.** Βλ. λεπτομέρειες παρακάτω |
-| **Docker Policy Broker — negative tests** | Επιβεβαιώθηκε: write μέσω read proxy → 403, read μέσω lifecycle proxy → 403, Vaultwarden ως target σε `restart_container` → απορρίπτεται στο Python policy layer πριν καν φτάσει σε proxy | 2026-08-02 |
-| **Loki + Grafana** (observability) | Centralized log aggregation. Loki + Promtail (host-level, docker_sd auto-discovery) + Grafana, όλα σε δικό τους isolated `observability-net`. Grafana στο port 3002 (browser UI). | 2026-08-03. Ξεχωριστό directory `~/jarvis-observability/`, δικό του `docker compose up -d` — δεν αγγίζει τίποτα από τον orchestrator/proxies. |
-| **`list_recent_backups`** | Read-only, listing των `protocol_permafrost` runs: μέγεθος, volumes, USB sync status, per-component OK/FAIL/WARN από `backup.log`. | 2026-08-03. Proxy: κανένα (pure filesystem read, ίδιο σκεπτικό με `check_disk_space`). |
-| **`os-helper`** (host-side daemon, νέα κατηγορία) | Νέος, 4ος broker — αλλά **εκτός** Docker Policy Broker family: systemd service στο host (όχι container), εκθέτει 3 read-only endpoints (`get_failed_units`, `get_disk_health`, `get_network_state`) μέσω HTTP, καλείται από τον orchestrator μέσω `host.docker.internal`. | 2026-08-03. Βλ. λεπτομερή ενότητα παρακάτω. |
----
-
-## 🔧 Docker Policy Broker — λεπτομέρειες (ενεργό, πολυ-session project)
-
-### Τι ολοκληρώθηκε σήμερα (2026-08-01)
-
-- **3 proxy instances** (`docker-read-proxy`, `docker-lifecycle-proxy`, `docker-maintenance-proxy`) βασισμένα στο `tecnativa/docker-socket-proxy`, pinned με digest (`@sha256:1f5038b54f06...`), το καθένα με μόνο τα API sections που πραγματικά χρειάζεται:
-  - **read-proxy**: `CONTAINERS=1, SYSTEM=1, POST=0` — read-only, καλύπτει diagnose_system + verification steps
-  - **lifecycle-proxy**: `POST=1, CONTAINERS=0, ALLOW_START/STOP/RESTARTS=1` — μόνο τα 3 lifecycle endpoints
-  - **maintenance-proxy**: `POST=1, CONTAINERS=1, BUILD=1, SYSTEM=0, IMAGES=0, NETWORKS=0` — για sandbox's `docker run` και permafrost's `backup.sh`
-- **Dedicated internal networks** ανά proxy (`docker-read-net`, `docker-lifecycle-net`, `docker-maintenance-net`) — μόνο ο orchestrator συνδέεται σε όλα, το Open WebUI/Ollama (στο κοινό `jarvis-ai-net`) δεν βλέπουν καν τα proxies
-- **Healthchecks** σε όλα τα proxies + `depends_on: condition: service_healthy` στον orchestrator
-- **Mount split** στον orchestrator: `policy.yaml`, `tools/`, `lib/`, `backup.sh`, `kill-switch.sh`, τα protocol scripts, `smoke_test.sh` → `:ro`. Μόνο `logs/` και `jarvis-backups/` → `:rw`. Το `orchestrator/` source directory αφαιρέθηκε εντελώς από τα mounts (είναι baked στο image) — **εκτός** από `schema.sql`, το οποίο *δεν* είναι baked (το Dockerfile κάνει `COPY main.py errors.py subprocess_wrapper.py audit.py .` ρητά, όχι wildcard) και χρειάστηκε δικό του στοχευμένο `:ro` mount μετά από πραγματικό startup crash στο testing.
-- **Port 8001**: παρέμεινε `127.0.0.1:8001:8001` (όχι `0.0.0.0`) — συντηρητική επιλογή, δεν επιβεβαιώθηκε με σιγουριά πώς ακριβώς το Open WebUI καλεί σήμερα τον orchestrator (πιθανώς UI-configured connection, όχι env var — το `OPENAI_API_BASE_URL` env var του Open WebUI container βρέθηκε κενό).
-- Live tested: όλα τα 3 proxies επιβεβαιώθηκαν standalone (read επιτρέπει ps/μπλοκάρει stop, lifecycle μπλοκάρει ps/επιτρέπει restart, maintenance επιτρέπει system df) πριν συνδεθούν με τον orchestrator. Orchestrator ξεκινά καθαρά (`Uvicorn running on http://0.0.0.0:8001`), βασική συνομιλία μέσω Open WebUI επιβεβαιωμένα λειτουργική.
-- Backup (PERMAFROST, SSH) τρέχτηκε πριν την αλλαγή ως safety net — όλα τα 8 Docker volumes (συμπ. Vaultwarden) OK. Δύο άσχετα, προϋπάρχοντα issues ανακαλύφθηκαν παράλληλα (βλ. "Νέα ευρήματα" παρακάτω), δεν μπλόκαραν τη σημερινή δουλειά.
-
-### ✅ Ολοκληρώθηκε σήμερα — `lib/docker_env.py` helper + routing σε 5 tools
-
-Νέο helper `~/jarvis/lib/docker_env.py`: `docker_env(proxy)` όπου `proxy` ∈ {"read", "lifecycle", "maintenance"}, επιστρέφει `{**os.environ, "DOCKER_HOST": ...}`. Ρίχνει `ValueError`/`RuntimeError` σε άγνωστο proxy name ή λείπον env var, αντί για σιωπηλό fallback. Import pattern: `sys.path.insert(0, "/app/jarvis/lib")` πριν το `from docker_env import docker_env` — **όχι** `from lib.docker_env import ...` (το `lib/` δεν είναι package, δεν έχει `__init__.py`· το flat-import lookup γίνεται μέσω `sys.path.insert`, ίδιο pattern με το προϋπάρχον `redact.py`).
-
-**Routing ολοκληρωμένο και standalone-tested (`docker exec jarvis-orchestrator sh -c 'TOOL_ARG_...=... python3 .../script.py'`):**
-- `restart_container` — `docker restart` → lifecycle, `docker inspect` → read. **Επιπλέον end-to-end tested μέσω chat + `/confirm`.**
-- `stop_container` — `docker stop` → lifecycle, `docker inspect` → read.
-- `start_container` — `docker start` → lifecycle, `docker inspect` → read. (Πρώτη προσπάθεια είχε ξεχάσει το `env=` στο ίδιο το `docker start` block ενώ το `docker inspect` ήταν ήδη σωστό — εντοπίστηκε από "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" στο standalone test, διορθώθηκε.)
-- `check_docker_status` — `docker ps -a` → read. Χρειάστηκε γιατί το `diagnose_system` το καλεί έμμεσα· χωρίς αυτό το JARVIS "έβλεπε" μηδέν containers.
-- `diagnose_system` — και τα 4 subprocess calls (`docker ps -a`, `docker inspect`, `docker logs`, `docker system df`) → read. Προστέθηκε επίσης explicit error surfacing (`{"error": ...}`) στο `get_containers`/`get_disk_usage` αντί για σιωπηλά κενά αποτελέσματα όταν αποτυγχάνει το subprocess.
-
-**Μάθημα από τη σημερινή δουλειά (για τα tools που μένουν):** μετά από κάθε αλλαγή σε αρχείο με πολλαπλά `subprocess.run`, να γίνεται `grep -c 'subprocess.run'` έναντι `grep -c 'env=docker_env'` πριν το standalone test — το `start_container` bug ήταν ακριβώς αυτό, ένα block ξεχάστηκε ενώ το άλλο ήταν σωστό.
-
-**2026-08-02: ολοκληρώθηκαν και τα 3 εναπομείναντα tools.** Routing 5/5 subprocess calls σε `repair_system`, 1/1 σε `sandbox`, dual-proxy σε `protocol_permafrost`/`backup.sh`. Λεπτομέρειες παρακάτω.
-
-### ✅ 2026-08-02 — `repair_system` routing + buildx CLI incompatibility (νέο εύρημα)
-
-Routing πρόσθεσε `env=docker_env(...)` σε όλα τα 5 subprocess calls (`preview`/`clean_docker_disk`/`clean_build_cache`, read+maintenance mix). Standalone tested `confirmed=false` και `confirmed=true`.
-
-**`clean_docker_disk`**: παραμένει μπλοκαρισμένο όπως ήδη γνωστό (NETWORKS/IMAGES όχι ανοιχτά, σκόπιμα).
-
-**`clean_build_cache`**: routing μόνο του δεν αρκούσε — `docker builder prune` είναι buildx CLI command, όχι απλό daemon API call. Buildx κρατάει δικό του context state (`~/.docker/buildx/`) που δεν υπάρχει μέσα στον orchestrator· χωρίς αυτό ψάχνει για dedicated BuildKit container (`buildx_buildkit_default`) που δεν υπάρχει ούτε μπορεί να δημιουργηθεί μέσω του στενού maintenance proxy. Δοκιμάστηκαν `docker context create` + `buildx create --driver docker` — σκάει με "additional instances of driver docker cannot be created" (ο `docker` driver επιτρέπεται μόνο μία φορά, buildx-wide, ανεξαρτήτως context name).
-
-**Λύση**: παράκαμψη του buildx CLI εντελώς, απευθείας κλήση του υποκείμενου Docker Engine API endpoint `POST /build/prune` μέσω `urllib` (βλ. `_build_prune_via_api()` στο `repair_system/script.py`). Καλύπτεται πλήρως από το ήδη υπάρχον `BUILD=1, POST=1` στο maintenance proxy, καμία επιπλέον permission δεν χρειάστηκε. Επιβεβαιωμένο standalone: `"status": "success"`, `caches_deleted`, `space_reclaimed_bytes`.
-
-### ✅ 2026-08-02 — `sandbox` routing + gVisor isolation επιβεβαιωμένο μετά το routing
-
-1 subprocess call (`docker run --runtime=runsc ...`) → maintenance proxy. Πριν το routing επιβεβαιώθηκε ρητά ότι το `--runtime=runsc` flag περνάει καθαρά μέσω proxy (δεν κάνει σιωπηλό downgrade σε `runc`) — δοκιμή `/proc/version` μέσα στο container επέστρεψε `Linux version 4.19.0-gvisor ...`, το gVisor fingerprint. Επιβεβαιωμένο ξανά end-to-end μετά το routing, μέσω του πραγματικού tool script.
-
-### ✅ 2026-08-02 — `protocol_permafrost`/`backup.sh` dual-proxy routing
-
-`backup.sh` χρειάζεται **δύο** proxies ταυτόχρονα, όχι έναν: `discover_volumes()` (`docker volume ls`, read-only) → read proxy· `backup_volume()` (`docker run -v` per volume) → maintenance proxy. Ένα μοναδικό global `DOCKER_HOST` δεν αρκεί.
-
-Υλοποίηση: το `backup.sh` πήρε δύο μικρά wrappers, `docker_read()`/`docker_maintenance()` (`docker ${VAR:+-H "$VAR"} "$@"` — no-op fallback σε local socket όταν οι μεταβλητές είναι unset, άρα SSH/manual usage δεν επηρεάζεται καθόλου). Το `protocol_permafrost/script.py` περνάει ρητά `DOCKER_READ_PROXY`/`DOCKER_MAINTENANCE_PROXY` στο env του subprocess (όχι το `docker_env()` helper — αυτό θέτει ένα μοναδικό `DOCKER_HOST`, εδώ χρειάζονταν δύο side-by-side).
-
-Χρειάστηκε επίσης: **`VOLUMES=1` προστέθηκε στο read proxy** (`discover_volumes()` έπαιρνε 403 χωρίς αυτό — δεν υπήρχε καθόλου `VOLUMES` env var πριν, default `0`). Πρώτη προσπάθεια πρόσθεσε `VOLUMES=1` αλλά ξέχασε ότι υπήρχε ήδη `VOLUMES=0` παρακάτω στην ίδια "Ρητά κλειστά" λίστα — το τελευταίο σε YAML list-style environment νικάει, οπότε το compose συνέχιζε να διαβάζει `0` ακόμα και μετά από πλήρες `stop`/`rm`/`up` του proxy. Διορθώθηκε αφαιρώντας το παλιό duplicate. **Μόνο στο read proxy** (`POST=0` ήδη εγγυάται read-only εκεί) — ρητά όχι στο maintenance proxy, ώστε να μη φαρδύνει το ήδη-φαρδύ maintenance scope για κάτι που είναι εννοιολογικά read-only.
-
-### 🔴 2026-08-02 — σοβαρό bug βρέθηκε + διορθώθηκε: self-referential tar στο `backup_config()`
-
-Κατά το πρώτο end-to-end test του νέου permafrost routing, το backup κρεμόταν επ' αόριστον (>10 λεπτά, timeout) χωρίς καμία πρόοδο. Ρίζα: `backup_config()`'s `tar` του `$JARVIS_HOME` **δεν εξαιρούσε το ίδιο το `jarvis-backups/` directory**, το οποίο βρίσκεται μέσα στο `$JARVIS_HOME`. Ο tar σκάναρε αναδρομικά μέσα στο `jarvis-backups/`, έβρισκε προηγούμενα backup run directories (το καθένα με δικό του `jarvis-config.tar.gz`), και προσπαθούσε να συμπεριλάβει το **ίδιο του το output αρχείο** που έγραφε ζωντανά τη στιγμή εκείνη — unbounded self-referential growth, όχι κλασικό zip-bomb αλλά μηχανικά παρόμοιο αποτέλεσμα. Επιβεβαιωμένο στην πράξη: διαδοχικά αποτυχημένα runs μεγάλωναν 7.6GB → 23GB → 35GB, το καθένα καταπίνοντας το προηγούμενο. Δίσκος έφτασε στιγμιαία 129GB χρήση πριν τον καθαρισμό (`sudo rm -rf` στα προβληματικά backup dirs — χρειάστηκε sudo γιατί τα αρχεία ανήκουν σε root, δημιουργημένα μέσα στον orchestrator container).
-
-**Fix**: προστέθηκε `--exclude="${base}/$(basename "$BACKUP_ROOT")"` στο `backup_config()`'s tar command. Επιβεβαιωμένο end-to-end: πλήρες PERMAFROST run ολοκληρώθηκε σε 51 δευτερόλεπτα (ήταν >10 λεπτά/timeout πριν), `jarvis-config: OK`, όλα τα 8 volumes OK (συμπ. vaultwarden), backup directory μέγεθος 974MB (λογικό, ήταν 35GB). **Αυτό το bug επηρέαζε και το SSH-manual usage** του `backup.sh`, όχι μόνο το JARVIS-triggered path — ήταν ήδη καταγεγραμμένο ως άγνωστο `jarvis-config:FAIL` από το 2026-08-01, τώρα βρέθηκε η πλήρης αιτία και διορθώθηκε μόνιμα.
-
-### ✅ Νέο εύρημα + fix: confirmation-flow bug στο system prompt (ξεχωριστό από το proxy routing)
-
-Μετά τη διόρθωση του routing, το `restart_container` εξακολουθούσε να μην ενεργοποιείται σωστά μέσω chat — το JARVIS απαντούσε σε φυσική γλώσσα ("γράψε /confirm") **χωρίς να έχει καλέσει το tool** με `confirmed=false`, οπότε δεν υπήρχε ποτέ pending file και το πραγματικό `/confirm` του χρήστη έβγαζε "There is no pending action". Επιβεβαιώθηκε μέσω audit log (`tool_calls` table, στήλες `tool_name`/`confirmed`) — μόνο `diagnose_system` calls, κανένα `restart_container`.
-
-Ρίζα: το system prompt του Open WebUI μοντέλου ("jarvis") έλεγε "πρότεινε ρητά... ζήτα πάντα επιβεβαίωση" χωρίς να διευκρινίζει ότι η ζήτηση επιβεβαίωσης πρέπει να γίνεται **μέσω κλήσης του tool** (`confirmed=false`), όχι με περιγραφή σε φυσική γλώσσα. Διορθώθηκε το system prompt (Workspace → Models → jarvis → Προτροπή Συστήματος): προστέθηκε ρητή οδηγία να καλείται πάντα το tool με `confirmed=false` πρώτα, ποτέ να μην περιγράφεται η ενέργεια αντί να κληθεί το tool. Επιβεβαιώθηκε end-to-end μετά το fix: audit log δείχνει σωστό δίδυμο `confirmed=0` → `confirmed=1`, πραγματικό restart επιτυχές μέσω chat.
-
-**Σημείωση:** ξεχωριστό, μικρότερο side-finding από το ίδιο testing — το JARVIS δεν κάνει καλό fuzzy-matching σε container aliases ("restart Kuma" δεν αναγνωρίστηκε ως "uptime-kuma", το μοντέλο ρώτησε κάτι άλλο αντί να ζητήσει διευκρίνιση ή να προχωρήσει). Δεν διορθώθηκε σήμερα, δεν ήταν στο scope — καταγράφεται για μελλοντικό system-prompt tuning.
-
-### Γνωστοί, καταγεγραμμένοι περιορισμοί (σκόπιμα όχι λυμένοι σε αυτό το Phase)
-
-- **Lifecycle proxy δεν κάνει per-container filtering.** Φιλτράρει σε επίπεδο ενέργειας (`ALLOW_RESTARTS` κλπ), όχι ανά container name. Το Vaultwarden protection παραμένει αποκλειστικά στο Python `policy.yaml` layer — ένας orchestrator με πλήρες RCE θα μπορούσε θεωρητικά να το παρακάμψει μιλώντας απευθείας στο proxy. Πραγματική λύση: dedicated lifecycle broker με δικό του per-container policy (μεγαλύτερο, μελλοντικό project — βλ. "Μελλοντικό — custom broker" παρακάτω).
-- **Maintenance proxy είναι το πιο "φαρδύ"** (`POST=1, CONTAINERS=1`) — sandbox's και permafrost's `docker run` πραγματικά χρειάζονται container-create-level access. Ένα RCE εκεί θα μπορούσε θεωρητικά να δημιουργήσει container με host mounts. Ίδια μελλοντική λύση: fixed-function agents.
-- **`clean_docker_disk` προσωρινά μη λειτουργικό.** Χρειάζεται `NETWORKS`/`IMAGES` access που σκόπιμα δεν ανοίξαμε (θα φάρδαινε το ήδη-φαρδύ maintenance proxy για ένα convenience cleanup tool). Θα επιστρέψει μαζί με τον μελλοντικό maintenance agent. `clean_build_cache` δουλεύει κανονικά (μόνο χρειάστηκε `BUILD=1`).
-- **`ALLOW_RESTARTS` του upstream project καλύπτει stop|restart|kill**, όχι μόνο restart, ό,τι κι αν λέει το όνομά του. Δεν αλλάζει τίποτα στο δικό μας use case (ήδη θέλουμε και τα τρία), απλά καταγεγραμμένο.
-
-### Γνωστό backup regression (αποδεκτό εν γνώσει)
-
-Μετά το mount split, το `protocol_permafrost` (μέσω `backup.sh`'s `tar` του `$JARVIS_HOME`) βλέπει πλέον μόνο ό,τι είναι ρητά mounted στον orchestrator — `tools/`, `lib/`, `policy.yaml`, scripts, `logs/`. **Δεν** περιλαμβάνει πλέον `README.md`, `STATUS.md`, `docker-compose.proxies.yml`, `.git/`, ή το `orchestrator/` source directory (πέρα από το mounted `schema.sql`). Απόφαση: αποδεκτό — αυτά τα αρχεία ζουν ήδη στο GitHub repo, δεν χρειάζονται μέσα στο disaster-recovery tarball.
-
-### Μελλοντικό — custom broker (ρητά ΕΚΤΟΣ scope σήμερα, μεγαλύτερο project)
-
-Καταγεγραμμένη ιδέα από εξωτερικό feedback (ChatGPT review), αξιολογήθηκε και αποφασίστηκε συνειδητά να ΜΗΝ γίνει τώρα — scope creep σε σχέση με το "mount split + proxies" που ήταν ο στόχος του session:
-
-- Custom FastAPI broker (Docker SDK, όχι subprocess CLI) που εκθέτει μόνο sanitized, υψηλού επιπέδου endpoints (`POST /v1/operations/prepare`, κλπ) αντί για category-level Docker API passthrough
-- Ξεχωριστοί fixed-function agents: `maintenance-agent` (μόνο `POST /clean-build-cache`, `POST /clean-docker-disk`, χωρίς raw Docker API προς τον orchestrator), `permafrost-agent` (μόνο `POST /run-backup`), `sandbox-runner` (πιθανώς ξεχωριστός rootless Docker daemon)
-- Lifecycle broker με πραγματικό per-container policy (aliases → πραγματικά container names, reject οτιδήποτε εκτός allowlist, στο ίδιο το broker αντί για μόνο στο Python tool layer)
-
-Θα αξιολογηθεί ξανά όταν/αν το threat model αλλάξει (π.χ. αν το JARVIS εκτεθεί ποτέ πέρα από Tailscale-only, ή αν προστεθούν περισσότεροι χρήστες/agents).
+| **Core orchestrator** | FastAPI service, tool discovery από manifests, confirm-flow, audit logging (SQLite) | — |
+| **Emergency protocols** (SNOWFALL / BLACKOUT / DAYBREAK) | SNOWFALL: instant soft lockdown μέσω chat. BLACKOUT: hard stop του orchestrator, μόνο SSH. DAYBREAK: recovery, μόνο SSH, ποτέ μέσω chat | — |
+| **Kill switch** | Σταματά μόνο Ollama + Open WebUI, όχι τον orchestrator | — |
+| **Backups** (`protocol_permafrost`) | `backup.sh`/`restore.sh`, auto-discovery Docker volumes, 7-run retention, external USB sync, `--test` sandbox mode | — |
+| **Sandbox** (gVisor) | Python code execution, πλήρως απομονωμένο | — |
+| **`diagnose_system`** | Read-only, πλήρης εικόνα: container status/health/restarts, log scan, disk usage | 2026-08-01 |
+| **`repair_system`** | `clean_docker_disk` (μη λειτουργικό, βλ. known limitations) + `clean_build_cache` (λειτουργικό) | 2026-08-01 |
+| **Docker Policy Broker** | 3 dedicated proxies (read/lifecycle/maintenance), κανένα άμεσο mount `docker.sock`, mount split (`:ro` παντού εκτός `logs/`, `jarvis-backups/`). Routing ολοκληρωμένο σε 7/7 tools. Negative tests περασμένα | 2026-08-01/02 |
+| **`summarize_inbox`** | Read-only IMAP, CSD UoC mailbox, explicit readonly mode | 2026-08-02 |
+| **Loki + Grafana** | Centralized log aggregation, isolated `observability-net`, Grafana port 3002 | 2026-08-03 |
+| **`list_recent_backups`** | Read-only listing των backup runs — μέγεθος, volumes, USB sync, per-component OK/FAIL/WARN | 2026-08-03 |
+| **`os-helper`** | Host-side systemd daemon, 3 read-only endpoints (failed units, disk health, network state) | 2026-08-03 |
+| **`ufw`** | Ενεργοποιήθηκε στο host, με SSH+os-helper rules | 2026-08-03 |
 
 ---
 
-## Επόμενο στη σειρά (ήδη αποφασισμένη προτεραιότητα)
+## 🔧 Docker Policy Broker — τεχνικές λεπτομέρειες
 
-Ρίζα του project roadmap (Backups → Sandbox → Email/reports → Database editing):
+### Αρχιτεκτονική
 
-1. ~~Docker Policy Broker Phase 1 — tools code update~~ **✅ Ολοκληρώθηκε πλήρως 2026-08-02** (7/7 tools routed, negative tests περασμένα, Vaultwarden protection επιβεβαιωμένο άθικτο). Βλ. λεπτομέρειες παραπάνω.
-2. **Email/daily reports** — read-only, βασισμένο στο ήδη υπάρχον audit.db. Χαμηλό ρίσκο, immediate value. Ρεαλιστικά ξεχωριστό session (SMTP setup/credentials, scheduling, format design) — όχι quick add-on.
-3. **`reconnect_network`** — τρίτο repair_type, μισό σχεδιασμένο (Docker network inspect για containers που δεν επικοινωνούν). Σημείωση: θα χρειαστεί επίσης να αποφασιστεί ποιο proxy το καλύπτει (κανένα proxy δεν έχει `NETWORKS=1` ενεργό σήμερα).
-4. **Database editing/rollback** — χρειάζεται δικό του ασφαλή σχεδιασμό, πιθανώς TOTP-level confirmation
+3 proxy instances (`docker-read-proxy`, `docker-lifecycle-proxy`, `docker-maintenance-proxy`), `tecnativa/docker-socket-proxy`, pinned με digest, το καθένα στο δικό του internal network:
 
-## Security/production-learning track
+- **read-proxy**: `CONTAINERS=1, SYSTEM=1, VOLUMES=1, POST=0` — read-only
+- **lifecycle-proxy**: `POST=1, CONTAINERS=0, ALLOW_START/STOP/RESTARTS=1` — μόνο 3 lifecycle endpoints
+- **maintenance-proxy**: `POST=1, CONTAINERS=1, BUILD=1, SYSTEM=0, IMAGES=0, NETWORKS=0`
 
-Ξεχωριστό, παράλληλο track — production-grade security patterns για μαθησιακή αξία (offensive/defensive security ενδιαφέρον):
+Mount split στον orchestrator: `policy.yaml`, `tools/`, `lib/`, scripts όλα `:ro`. Μόνο `logs/` και `jarvis-backups/` `:rw`. Port 8001 σε `127.0.0.1` μόνο.
 
-1. **Docker Policy Broker + rootless Docker** — Phase 1 (proxy layer + mount split, 2026-08-01) + tools code update (7/7 tools, negative tests, 2026-08-02) **✅ πλήρως ολοκληρωμένο**, βλ. λεπτομερή ενότητα παραπάνω. Custom broker/agents παραμένουν μελλοντικό, μεγαλύτερο project (βλ. "Μελλοντικό — custom broker").
-2. **Trivy** — container vulnerability scanning (CVEs σε images πριν τρέξουν). Χαμηλό effort, θα μπει σαν νέο read-only tool πάνω στο ήδη υπάρχον manifest pattern.
-3. **AIDE / File Integrity Monitoring** — ειδοποίηση αν αλλάξει κρίσιμο αρχείο (`policy.yaml`, `backup.sh`, `.env`). Στοχευμένο, μικρό effort. Σημείωση: μετά το mount split αυτά τα αρχεία είναι πλέον ήδη `:ro` μέσα στον orchestrator, που μειώνει (όχι μηδενίζει) την πρακτική αξία αυτού του item — ο host-side κίνδυνος παραμένει.
-4. **Loki + Grafana** (centralized logging) — μαζεύει logs από όλα τα containers σε ένα σημείο, καλό troubleshooting tool, πιθανώς επικαλύπτεται με το email/reports feature.
+`lib/docker_env.py`: `docker_env(proxy)` → env dict με σωστό `DOCKER_HOST`. Import pattern: `sys.path.insert(0, "/app/jarvis/lib")` (flat import, `lib/` δεν είναι package).
 
-**Αποφασισμένο να μπει αργότερα, όχι τώρα:**
-- **Wazuh (SIEM/HIDS)** — μεγάλη εκπαιδευτική αξία, αλλά στο τρέχον 16GB laptop θα πιέσει σοβαρά τη μνήμη (χρειάζεται ρεαλιστικά 4-8GB+ αφιερωμένα). Περιμένει το dedicated hardware upgrade.
-- **Suricata/Zeek** — χρειάζεται span/mirror port από managed switch, δεν έχει πραγματική αξία στο τρέχον network topology.
-- **VLAN segmentation** — χρειάζεται managed switch (εξωτερική αγορά, δεν έχεις ακόμα).
-- **Traefik (reverse proxy)** — το Tailscale ήδη καλύπτει το μεγαλύτερο μέρος της αξίας του (encryption + implicit auth) όσο όλα παραμένουν εσωτερικά, όχι δημόσια εκτεθειμένα.
-- **CrowdSec** — χαμηλή αξία χωρίς public-facing SSH/nginx (όλα ήδη πίσω από Tailscale).
-- **Secrets management (Vault)** — overkill για το τρέχον μέγεθος, το `.env` με 600 permissions ήδη καλύπτει το πρακτικό ρίσκο.
-- **Canary tokens** — καλή άσκηση, χαμηλή προτεραιότητα.
+### Routing — 7/7 tools
+
+`restart_container`, `stop_container`, `start_container`, `check_docker_status`, `diagnose_system`, `repair_system`, `sandbox` — όλα routed. `protocol_permafrost` χρειάστηκε **dual-proxy** routing (`docker_read()`/`docker_maintenance()` wrappers στο `backup.sh`, no-op fallback σε local socket για SSH/manual usage).
+
+### Bugs βρέθηκαν + διορθώθηκαν
+
+- **`start_container`**: ένα από τα δύο subprocess calls ξέχασε το `env=docker_env(...)`. Μάθημα: μετά από κάθε multi-call routing change, `grep -c 'subprocess.run'` έναντι `grep -c 'env=docker_env'`.
+- **`clean_build_cache`**: `docker builder prune` είναι buildx CLI command, όχι daemon API call — δεν δουλεύει μέσω proxy (buildx context state δεν υπάρχει μέσα στον orchestrator). Fix: απευθείας `POST /build/prune` μέσω `urllib`, καλύπτεται ήδη από `BUILD=1, POST=1`.
+- **`VOLUMES=1` duplicate στο read proxy**: πρώτη προσπάθεια πρόσθεσε `VOLUMES=1` αλλά υπήρχε ήδη ξεχασμένο `VOLUMES=0` παρακάτω στο ίδιο compose block — το τελευταίο σε YAML list-style environment νικάει.
+- **🔴 Self-referential tar στο `backup_config()`** (σοβαρό): το tar του `$JARVIS_HOME` δεν εξαιρούσε το `jarvis-backups/` directory (μέσα στο ίδιο `$JARVIS_HOME`), οπότε προσπαθούσε να συμπεριλάβει το ίδιο του το output αρχείο — unbounded growth, 7.6GB → 23GB → 35GB σε διαδοχικά failed runs, δίσκος έφτασε 129GB χρήση. Fix: `--exclude` του backup output directory. Επηρέαζε και το SSH-manual path, όχι μόνο JARVIS-triggered.
+- **Confirmation-flow bug (system prompt)**: το JARVIS απαντούσε "γράψε /confirm" σε φυσική γλώσσα χωρίς να καλεί το tool με `confirmed=false` πρώτα — ποτέ δεν δημιουργούνταν pending action. Fix: ρητή οδηγία στο system prompt να καλείται πάντα το tool πρώτα.
+
+### Γνωστοί περιορισμοί (σκόπιμα, όχι bugs)
+
+- **Lifecycle proxy δεν κάνει per-container filtering** — μόνο επίπεδο ενέργειας. Vaultwarden protection είναι αποκλειστικά στο Python `policy.yaml` layer.
+- **Maintenance proxy είναι το πιο φαρδύ** (`POST=1, CONTAINERS=1`) — sandbox/permafrost χρειάζονται πραγματικά container-create access.
+- **`clean_docker_disk` μη λειτουργικό** — χρειάζεται `NETWORKS`/`IMAGES` που σκόπιμα δεν ανοίξαμε.
+
+### Backup regression (αποδεκτό)
+
+Μετά το mount split, το backup δεν περιλαμβάνει πλέον `README.md`, `STATUS.md`, `docker-compose.proxies.yml`, `.git/` — ζουν ήδη στο GitHub repo.
+
+### Μελλοντικό — custom broker (ρητά εκτός scope)
+
+Αξιολογήθηκε, αποφασίστηκε συνειδητά όχι τώρα: custom FastAPI broker (Docker SDK) με sanitized endpoints, ξεχωριστοί fixed-function agents (maintenance/permafrost/sandbox), lifecycle broker με πραγματικό per-container policy. Θα αξιολογηθεί ξανά αν το threat model αλλάξει (π.χ. exposure πέρα από Tailscale-only, περισσότεροι χρήστες).
+
+---
+
+## 📧 `summarize_inbox` — τεχνικές λεπτομέρειες (2026-08-02)
+
+Read-only IMAP (`mailhost.csd.uoc.gr:993`), explicit `readonly=True` στο `select()` — πρωτόκολλο-επίπεδο εγγύηση, όχι μόνο "δεν γράψαμε write code". Secrets στο `orchestrator/.env` (**όχι** `~/jarvis/.env` — δεν υπάρχει). Default `mode=since` (χθες) — το `mode=unseen` δοκιμάστηκε πρώτα, πολύ θορυβώδες.
+
+**Bugs:** manifest schema mismatch (πρώτη εμφάνιση αυτού του pattern bug, βλ. παρακάτω η γενική ενότητα) · `.env` path confusion (`orchestrator/.env`, όχι root) · `docker restart` δεν ξαναδιαβάζει `.env` (χρειάζεται `--force-recreate`) · directory typo (`summirize_inbox`) · HTML-only emails έδιναν raw markup (fix: strip tags μέσω stdlib `html.parser`).
+
+**Δεν υλοποιήθηκε (συνειδητά):** cron-triggered daily run + Open WebUI message-posting — μένει on-demand μόνο, απλούστερο.
 
 ---
 
-## Νέα ευρήματα (2026-08-01, ανεξάρτητα από το Docker Policy Broker)
+## 📊 Loki + Grafana — τεχνικές λεπτομέρειες (2026-08-03)
 
-- **`backup.sh`'s `sync-external` step είναι πολύ αργό σε αυτό το hardware**, όχι κρεμασμένο — ένα πλήρες sync στο εξωτερικό USB (`/mnt/backup_external`, `/dev/sdc1`, ext4) τρέχει στα ~1.6MB/s effective throughput. Ένα 2.8GB αρχείο μόνο του χρειάζεται ~20-30 λεπτά. Δεν είναι bug, είναι hardware bottleneck (πιθανό USB 2.0 ή αργός δίσκος). Αν χρειαστεί ποτέ πιο γρήγορο sync, θα χρειαστεί καλύτερο USB 3.0 setup/δίσκο — όχι script fix.
-- ~~`backup_config` step (`jarvis-config`) απέτυχε (FAIL) σε πρόσφατο run~~ **✅ Διερευνήθηκε και διορθώθηκε 2026-08-02** — δεν ήταν permission issue, ήταν self-referential tar bug (βλ. λεπτομερή ενότητα παραπάνω).
-- **Ασφάλεια credentials**: κατά τη διάρκεια debugging, το `OPENAI_API_KEY` εμφανίστηκε σε καθαρό κείμενο σε chat μέσω `docker inspect ... Config.Env`. Επιβεβαιώθηκε ότι το `.env` δεν είναι committed στο git repo. Συστήθηκε revoke+νέο key ως προφύλαξη (ανεξάρτητα από το αν διέρρευσε αλλού) — **έλεγξε αν έγινε.**
+Loki + Promtail (host-level, `docker_sd_configs` auto-discovery, **όχι** driver plugin — μηδενικές αλλαγές σε υπάρχοντα services) + Grafana, σε δικό τους isolated `observability-net`. Grafana στο port **3002** (3000 = open-webui, 3001 = uptime-kuma, και τα δύο ήδη κατειλημμένα). 7-day retention.
+
+**Bug:** custom timestamp-extraction regex στο Promtail pipeline προκαλούσε `"timestamp too new"` errors στο Loki — fix: αφαιρέθηκε εντελώς, εμπιστευόμαστε το native Docker envelope timestamp αντί να το ξαναμαντεύουμε από το log text.
+
+Ξεχωριστό, ανεξάρτητο compose project (`~/jarvis-observability/`) — δεν αγγίζει τίποτα από το `docker-compose.proxies.yml`. JARVIS δεν queries το Loki μέσω chat σήμερα (θεωρήθηκε περιττό — το ήδη υπάρχον `get_container_logs` καλύπτει το καθημερινό use case).
+
+---
+
+## 📦 `list_recent_backups` — τεχνικές λεπτομέρειες (2026-08-03)
+
+Read-only, καμία proxy (pure filesystem read). Διαβάζει backup directories + `backup.log`.
+
+**Bugs:**
+- **Log-block parsing**: το parser περίμενε γραμμή `"Backup completed"` για να κλείσει κάθε run block — δεν υπάρχει πάντα σε αυτή τη μορφή στο πραγματικό log. Fix: το block κλείνει στον επόμενο header ή EOF, όχι σε συγκεκριμένο footer text.
+- **Many-to-one timestamp matching** (σοβαρότερο): naive "nearest absolute distance" matching επέτρεπε σε ένα directory run να "κλέψει" το log summary ενός **γειτονικού, διαφορετικού** run (ένα dry-run block ήταν χρονικά πιο κοντά σε λάθος directory απ' ό,τι το δικό του σωστό summary, επειδή το πραγματικό run πήρε πάνω από ένα λεπτό να τρέξει). Fix: forward-only, one-to-one matching — ένα log summary πρέπει να είναι ίσο ή μεταγενέστερο του directory start time, και κάθε log entry καταναλώνεται μία φορά.
+- **`~` resolve-άρει σε `/root`**: βλ. γενική ενότητα bugs παρακάτω.
 
 ---
 
-## Ανοιχτά ερωτήματα / decisions που θα χρειαστούν σε επόμενο session
+## 🖥️ `os-helper` — τεχνικές λεπτομέρειες (2026-08-03)
 
-- ~~Tools code update~~ ✅ Ολοκληρώθηκε 2026-08-02
-- ~~Έλεγχος του `jarvis-config` backup FAIL~~ ✅ Βρέθηκε η αιτία (self-referential tar) και διορθώθηκε 2026-08-02
-- **Επιβεβαίωση αν έγινε revoke του `OPENAI_API_KEY`** — ανοιχτό από 2026-08-01, ακόμα δεν ελέγχθηκε
-- Αν το Loki/Grafana τελικά αντικαταστήσει ή απλά συμπληρώσει το email/daily reports feature
-- Πότε ρεαλιστικά αξίζει το hardware upgrade (custom build, RTX 2060/3060, €400-600) — π.χ. "όταν θέλουμε να προσθέσουμε Wazuh" θα μπορούσε να είναι το practical trigger point αντί για αόριστο timeline
-- Πότε αξίζει να ξεκινήσει το custom broker/agents project (βλ. "Μελλοντικό — custom broker" παραπάνω) — π.χ. αν αλλάξει το threat model
+### Σκοπός & αρχιτεκτονική
 
-## Νέα προσθήκη: `summarize_inbox` (2026-08-02)
+Πρώτο host-OS-level tooling — μέχρι τώρα όλα τα tools έβλεπαν τον κόσμο μόνο μέσα από Docker. Ξεχωριστό systemd service στο host (`os-helper.service`, Python stdlib `http.server`, port 8787), **όχι** container — το `systemctl --failed` χρειάζεται πρόσβαση στο systemd D-Bus socket του host, που μέσα από container θα σήμαινε `--pid=host` ή αντίστοιχο, σπάζοντας το isolation μοντέλο. Ο orchestrator μιλάει μέσω `host.docker.internal:8787` (`extra_hosts` στο compose).
 
-Νέο read-only tool: διαβάζει το CSD UoC mailbox (`mailhost.csd.uoc.gr`, IMAP over SSL, θύρα 993) και δίνει headers + short body preview στο μοντέλο για σύνοψη. **Δεν** αγγίζει Docker/proxies καθόλου — απευθείας IMAP call, ξεχωριστό μονοπάτι από όλα τα υπόλοιπα tools.
+### Privilege separation για SMART data
 
-**Ασφάλεια:**
-- IMAP session ανοίγει σε **explicit readonly mode** (`select(mailbox, readonly=True)`) — πρωτόκολλο-επίπεδο εγγύηση, όχι απλά "δεν γράψαμε write code". Καμία `STORE`/`EXPUNGE`/`COPY` εντολή δεν στέλνεται ποτέ.
-- Νέα secrets στο `orchestrator/.env` (**όχι** στο `~/jarvis/.env` — αυτό δεν υπάρχει, ζει μέσα στο `orchestrator/` directory): `CSD_MAIL_USER`, `CSD_MAIL_PASSWORD`. Ίδιο 600-permission pattern με τα υπόλοιπα.
-- Privacy note: το περιεχόμενο των emails περνάει από το GPT-4o (εξωτερικό, tool-calling μοντέλο) για τη σύνοψη — συνειδητή εξαίρεση στο "local-first" principle, ίδιο σκεπτικό με το γιατί χρησιμοποιούμε GPT-4o για tool-calling γενικά.
-- Auth: plain password πάνω από TLS (όχι OAuth — το ίδρυμα δεν το υποστηρίζει). Άρα ένα compromise του server ισοδυναμεί με compromise του πανεπιστημιακού λογαριασμού, όχι μόνο ενός isolated API key — μεγαλύτερο stake από π.χ. το OpenAI key.
+Αρχικό σχέδιο (`sudo smartctl` μέσα στο `os-helper.service`) απέτυχε — το `NoNewPrivileges=true` απενεργοποιεί **και** sudo **και** file capabilities (`setcap`) κατά το `execve()`, όχι μόνο setuid binaries. Τελική λύση, πλήρης privilege separation:
 
-**Default συμπεριφορά:** `mode=since`, με `since_date` default "χθες" αν δεν δοθεί ρητά. Το `mode=unseen` (unread flag) υπάρχει σαν επιλογή αλλά **δεν** είναι default — δοκιμάστηκε πρώτα, βγήκε πολύ θορυβώδες γιατί υπήρχαν μήνες συσσωρευμένα unread newsletters/spam. `since yesterday` είναι πιο υγιές default.
-
-**Επεκτασιμότητα:** read-only τώρα, αλλά σχεδιασμένο ώστε reply/mark-as-read/delete να μπουν αργότερα σαν *ξεχωριστό*, νέο write-capable tool με δικό του confirm-required tier — όχι flag flip πάνω σε αυτό. Ίδιο σκεπτικό με το read/lifecycle/maintenance proxy split του Docker Policy Broker.
-
-**Bugs βρέθηκαν + διορθώθηκαν κατά την υλοποίηση:**
-
-1. **Manifest schema mismatch.** Πρώτη γραφή του manifest ακολούθησε JSON-Schema-style `parameters: {type: object, properties: {...}}` — έσκαγε στο `main.py`'s `build_openai_tools_schema()` με `AttributeError: 'str' object has no attribute 'get'`, γιατί ο orchestrator περιμένει `parameters` σαν **λίστα** από `{name, type, description, required}` dicts (ίδιο σχήμα με το `restart_container`), όχι JSON Schema object. Διορθώθηκε ευθυγραμμίζοντας με το πραγματικό σχήμα.
-2. **`.env` δεν είναι στο `~/jarvis/`.** Ζει σε `~/jarvis/orchestrator/.env` — μπερδεύτηκε αρχικά επειδή το `docker-compose.proxies.yml` είναι στο root του `~/jarvis/`, αλλά το `env_file:` directive δείχνει μέσα στο `orchestrator/`.
-3. **`docker restart` δεν ξαναδιαβάζει `.env`.** Μετά την προσθήκη των νέων credentials, `docker restart jarvis-orchestrator` δεν έφερε τα νέα env vars μέσα στον container — env vars μπαίνουν μόνο στη δημιουργία του container, όχι σε κάθε restart. Χρειάστηκε πλήρες recreate: `docker compose -f docker-compose.proxies.yml up -d --force-recreate jarvis-orchestrator`. Ίδιο ισχύει προφανώς και για μελλοντικά `.env` changes.
-4. **Directory typo.** Πρώτο αντίγραφο των tool αρχείων κατέληξε σε `tools/summirize_inbox/` (λάθος γράμμα) αντί για `tools/summarize_inbox/` — ο orchestrator έψαχνε στο σωστό path, δεν έβρισκε τίποτα. Διορθώθηκε με `mv`.
-5. **HTML-only emails έδιναν raw markup.** Emails χωρίς `text/plain` alternative (συνηθισμένο σε predatory-journal spam) έδιναν ωμό `<!DOCTYPE html>...` στο preview. Προστέθηκε fallback: αν δεν υπάρχει plain text part, γίνεται strip tags/script/style μέσω `html.parser` (stdlib, καμία νέα dependency) πριν το preview.
-6. **Cached tool-discovery.** Μετά τη διόρθωση του manifest, ένα `docker logs --tail` έδειχνε ακόμα το παλιό traceback — ήταν απλά παλιά, μη-φρέσκια γραμμή στο log, όχι νέο event. Το πραγματικό confirm ήρθε δοκιμάζοντας ξανά μετά από recreate και βλέποντας νέο timestamp με επιτυχές `tool=summarize_inbox ... success=True`.
-
-**Παρατηρήθηκε, όχι διορθωμένο:** το system prompt περνάει `confirmed=false` σαν param ακόμα και σε αυτό το read-only tool (κατάλοιπο από το γενικό confirm-flow instruction για write-tools). Δεν σπάει τίποτα — το tool code αγνοεί άγνωστα args — αλλά ίσως αξίζει μελλοντικό system-prompt tuning ώστε να μην περνάει `confirmed` σε read-only tools καθόλου.
-
-**Δεν υλοποιήθηκε (συνειδητή απόφαση):** αρχικό σχέδιο περιλάμβανε cron-triggered daily run + Open WebUI message-posting integration για αυτόματη πρωινή σύνοψη. Αποφασίστηκε να μείνει καθαρά **on-demand μέσω chat** — απλούστερο, καμία επιπλέον υποδομή (κανένα cron, καμία ανάγκη να ψάξουμε το Open WebUI message-posting API).
-
-
----
- 
-# Νέα λεπτομερής ενότητα: `os-helper` (2026-08-03)
- 
-## Σκοπός
- 
-Πρώτο host-OS-level tooling του JARVIS — μέχρι σήμερα όλα τα tools έβλεπαν τον κόσμο μόνο μέσα από Docker (containers/volumes/images). Το `os-helper` καλύπτει ερωτήσεις που κανένας Docker proxy δεν μπορεί να απαντήσει: failed systemd units, SMART δίσκου, host network interfaces.
- 
-## Αρχιτεκτονική
- 
-Ξεχωριστό systemd service στο host (`os-helper.service`, Python stdlib `http.server`, port 8787), **όχι** container — απόφαση βασισμένη στο ότι `systemctl --failed` χρειάζεται πρόσβαση στο systemd D-Bus socket του host, το οποίο μέσα από container θα σήμαινε `--pid=host` ή αντίστοιχο mount που ουσιαστικά σπάει το container isolation μοντέλο. Ο orchestrator μιλάει στο daemon μέσω `host.docker.internal:8787` (`extra_hosts: host.docker.internal:host-gateway` στο `docker-compose.proxies.yml`).
- 
-**Privilege separation για SMART data (σημαντική αρχιτεκτονική απόφαση):**
-Αρχικό σχέδιο ήταν `sudo smartctl` μέσα από το `os-helper.service` — απέτυχε, γιατί το `NoNewPrivileges=true` (ήδη ενεργό hardening directive) απενεργοποιεί **και** sudo **και** file capabilities (`setcap`) κατά το `execve()`, ανεξαρτήτως. Τελική λύση: πλήρης privilege separation σε **δεύτερο, ξεχωριστό systemd component**:
- 
 ```
 jarvis-smart-snapshot.timer (κάθε 5 λεπτά)
         ↓
@@ -212,71 +116,112 @@ jarvis-smart-snapshot.service [root, oneshot, hardcoded device list, καμία 
         ↓ atomic write
 /run/jarvis-os-helper/smart-health.json
         ↑ read-only
-os-helper.service [jarvis-oshelper user, NoNewPrivileges=true, μηδενική δυνατότητα escalation]
+os-helper.service [jarvis-oshelper user, NoNewPrivileges=true]
 ```
- 
-Το `os-helper.service` **ποτέ** δεν καλεί `smartctl` απευθείας — μόνο διαβάζει το snapshot file. `get_disk_health` reports `age_seconds`/`stale` ώστε η 5-λεπτη καθυστέρηση να είναι ρητή, όχι κρυφή.
- 
-**Firewall:** rule προστέθηκε (`ufw allow from 172.16.0.0/12 to any port 8787 proto tcp` — ευρύ private range επειδή ο orchestrator βρέθηκε συνδεδεμένος σε **4 διαφορετικά** `/16` subnets ταυτόχρονα, jarvis-ai-net + 3 proxy networks). ⚠️ **Δεν επιβάλλεται ακόμα** — `ufw` βρέθηκε global `inactive` στο host. Access control σήμερα = Tailscale-only, ίδιο με τα υπόλοιπα services. Βλ. "Ανοιχτά" παρακάτω.
- 
-## Bugs βρέθηκαν + διορθώθηκαν
- 
-1. **Manifest schema mismatch** (ίδιο pattern bug με το `summarize_inbox` προηγουμένως, ξαναβρέθηκε): `tier` → έπρεπε `privilege_tier`, `parameters: {}` → έπρεπε `parameters: []` (λίστα, όχι dict, ακόμα και όταν άδειο). Έσκαγε στο ίδιο `AttributeError: 'str' object has no attribute 'get'` στο `main.py`'s `build_openai_tools_schema()`. **4 tools επηρεάστηκαν** (τα 3 νέα os-helper tools + το `list_recent_backups`), όχι μόνο ένα — άξιζε να ξαναγραφτεί εδώ γιατί ξαναέπεσα στο ίδιο λάθος format παρόλο που ήταν ήδη καταγεγραμμένο.
-2. **`sys.path.insert` λάθος directory depth.** Υπέθεσα `lib/` μέσα στο `tools/` (`../lib`), πραγματικό layout είναι `lib/` αδερφός του `tools/` (`../../lib`) — `/app/jarvis/{tools/,lib/}`, δύο ξεχωριστά mounts στο compose, όχι ένα εμφωλευμένο. `ModuleNotFoundError: No module named 'os_helper_client'` σε production, παρόλο που τοπικό testing (λάθος directory assumption) δεν το έπιασε.
-3. **`~` resolve-άρει σε `/root` μέσα στον orchestrator, όχι στο SSH home directory.** Το `list_recent_backups` script έκανε `os.path.expanduser("~/jarvis/jarvis-backups")` — δούλευε σε standalone SSH test (`~` = `/home/nickchronis2004`), αλλά μέσα στον container ο process τρέχει σαν root, `~` = `/root`, path που δεν υπάρχει. Fix: hardcoded `/app/jarvis/jarvis-backups` (ήδη γνωστό, σταθερό container path από το compose mount), αντί για κάτι που εξαρτάται από ποιος τρέχει το process.
-4. **`docker restart` δεν φτάνει για compose-level αλλαγές.** Το `extra_hosts` directive χρειάστηκε πλήρες `docker compose up -d --force-recreate jarvis-orchestrator` — ίδιο, ήδη καταγεγραμμένο μάθημα από το `summarize_inbox` session (`.env` changes), επιβεβαιώθηκε ότι ισχύει γενικά για οποιαδήποτε compose-level (όχι μόνο env) αλλαγή.
-## Known limitation (hardware, όχι bug)
- 
-Το εξωτερικό USB backup drive (`/dev/sdc`) δεν υποστηρίζει SMART passthrough μέσω του συγκεκριμένου USB-bridge chipset του (Genesys Logic, VID:PID `0x05e3:0x0749`) — επιβεβαιωμένο με `smartctl --scan-open` (δεν βρίσκει το device κάτω από κανένα `-d` type). `get_disk_health` reports καθαρό error για αυτό το device, όχι false-healthy. Δύο επιπλέον `/dev/sda`/`/dev/sdb` slots (USB card-reader, συνήθως άδειο) αναγνωρίζονται σωστά σαν "no medium present", όχι σαν error.
- 
-## Deployment
- 
-- **Host-side** (`os-helper.service`, `jarvis-smart-snapshot.service`/`.timer`): εγκαταστάθηκαν σε `/opt/jarvis/os-helper/`, dedicated unprivileged user `jarvis-oshelper` για το κύριο daemon, root μόνο για τον snapshot collector.
-- **JARVIS-side tools** (`get_failed_units`, `get_disk_health`, `get_network_state`): standard `~/jarvis/tools/<name>/{manifest.yaml,script.py}` pattern, νέο shared `~/jarvis/lib/os_helper_client.py`.
-- End-to-end tested μέσω chat (Open WebUI) — και τα 3 tools + το `list_recent_backups` επιβεβαιωμένα λειτουργικά, σωστά, δομημένα αποτελέσματα.
+
+Το `os-helper.service` ποτέ δεν καλεί `smartctl` απευθείας. `get_disk_health` reports `age_seconds`/`stale`.
+
+### Bugs βρέθηκαν + διορθώθηκαν
+
+1. **Manifest schema mismatch** (ξαναβρέθηκε — ήδη καταγεγραμμένο από το `summarize_inbox` session): `tier` → έπρεπε `privilege_tier`, `parameters: {}` → έπρεπε `parameters: []` (λίστα, ποτέ dict). 4 tools επηρεάστηκαν (τα 3 os-helper + `list_recent_backups`). Τώρα τεκμηριωμένο στο README ως μόνιμο checklist item.
+2. **`sys.path.insert` λάθος directory depth**: `lib/` είναι **αδερφός** του `tools/` κάτω από `/app/jarvis/` (δύο ξεχωριστά compose mounts), όχι εμφωλευμένο μέσα του. Χρειαζόταν `../../lib`, όχι `../lib`.
+3. **`~` resolve-άρει σε `/root`**: ο orchestrator process τρέχει σαν root μέσα στο container. Standalone SSH tests (`~` = `/home/nickchronis2004`) έδειχναν sw δουλεύει, production όχι. Fix: hardcoded `/app/jarvis/jarvis-backups` αντί για `os.path.expanduser("~/...")`.
+4. **`docker restart` δεν αρκεί για compose-level αλλαγές**: το `extra_hosts` directive χρειάστηκε πλήρες `--force-recreate` — ίδιο μάθημα με το `.env` finding του `summarize_inbox` session, τώρα επιβεβαιωμένο ότι ισχύει γενικά, όχι μόνο για env vars.
+
+**Παρατήρηση:** τα bugs #2 και #3 είναι και τα δύο παραλλαγές του ίδιου υποκείμενου λάθους — υπόθεση για το πώς μοιάζει το filesystem/environment μέσα στον container, χωρίς πρώτα να το επιβεβαιώσω. Το νέο "Adding a New Tool" checklist στο README υπάρχει ρητά γι' αυτό.
+
+### Known limitation (hardware, όχι bug)
+
+Το εξωτερικό USB backup drive (`/dev/sdc`) δεν υποστηρίζει SMART passthrough μέσω του συγκεκριμένου USB-bridge chipset του (Genesys Logic, VID:PID `0x05e3:0x0749`) — επιβεβαιωμένο με `smartctl --scan-open` (δεν βρίσκει το device κάτω από κανένα `-d` type, hardware/firmware περιορισμός, όχι διορθώσιμο από λογισμικό). Δύο επιπλέον `/dev/sda`/`/dev/sdb` slots (USB card-reader, συνήθως άδειο) αναγνωρίζονται σωστά σαν "no medium present".
+
+### Deployment
+
+Host-side σε `/opt/jarvis/os-helper/`, dedicated unprivileged user `jarvis-oshelper` για το κύριο daemon, root μόνο για τον snapshot collector. JARVIS-side tools σε standard `~/jarvis/tools/<name>/` pattern, νέο shared `~/jarvis/lib/os_helper_client.py`. End-to-end tested μέσω chat.
+
 ---
- 
-# Ενημέρωση "Ανοιχτά ερωτήματα / decisions"
- 
-Προσθήκη νέων items:
- 
-- **`ufw` είναι inactive στο host** — το firewall rule για port 8787 (os-helper) υπάρχει στη ρύθμιση αλλά δεν επιβάλλεται. Ενεργοποίηση `ufw` σωστά (πρώτα SSH-allow rule, μετά `enable`, μετά verify) είναι ξεχωριστό, μελλοντικό task — ρίσκο να χαθεί SSH access αν γίνει απρόσεκτα, γι' αυτό αναβλήθηκε συνειδητά σήμερα.
-- **`secrets(.env): FAIL` σε πρόσφατο backup run** (`backup_2026-08-02_0047`, εντοπίστηκε μέσω του νέου `list_recent_backups`) — το `.env` δεν βρέθηκε στο αναμενόμενο path (`/app/jarvis/orchestrator/.env`) τη στιγμή εκείνου του run. Άξιζε να τσεκαριστεί ξεχωριστά — αν επαναληφθεί σε επόμενα runs, το πιο πρόσφατο backup δεν θα έχει αντίγραφο των secrets.
-- **Δύο backup runs έτρεξαν πολύ κοντά χρονικά** (`22:03`/`22:04`, 1 Αυγούστου) και ο ένας πάτησε πάνω στα αρχεία του άλλου (`tar: file changed as we read it`, ορατό στο πλήρες `backup.log`) — πιθανό missing lock/mutex ενάντια σε concurrent `protocol_permafrost` runs. Δεν διερευνήθηκε βαθύτερα σήμερα.
 
+## 🔥 `ufw` — ενεργοποίηση + Tailscale finding (2026-08-03)
 
+### Τι έγινε
 
-# Ενημέρωση STATUS.md — διόρθωση προηγούμενου "ufw inactive" known limitation
+`ufw` ήταν εγκατεστημένο αλλά **inactive** στο host — το rule για port 8787 (`172.16.0.0/12`) υπήρχε στη ρύθμιση αλλά δεν επιβαλλόταν. Ενεργοποιήθηκε προσεκτικά: πρώτα `sudo ufw allow ssh` (επιβεβαιωμένο SSH port 22 πρώτα), Termux στο κινητό δοκιμάστηκε ως δεύτερο ανεξάρτητο access channel πριν το `enable`, μετά `sudo ufw enable`. Καμία απώλεια πρόσβασης.
 
-**2026-08-03, αργότερα την ίδια μέρα:** Το `ufw` ενεργοποιήθηκε (`sudo ufw enable`, με προηγηθέν
-verified SSH-allow rule + Termux ως δεύτερο ανεξάρτητο κανάλι πρόσβασης πριν το enable — καμία
-απώλεια πρόσβασης). Status: `active`, `deny (incoming)` default, τα δύο αναμενόμενα rules (`22/tcp`
-από παντού, `8787/tcp` μόνο από `172.16.0.0/12`).
+### Εύρημα: το ufw rule δεν εμποδίζει tailnet κίνηση
 
-**Εύρημα κατά το verification test:** το `ufw` rule για το port 8787 **δεν εμποδίζει** incoming
-συνδέσεις που έρχονται μέσω του Tailscale interface (`tailscale0`). Επιβεβαιώθηκε: `curl` από άλλη
-Tailscale συσκευή (κινητό, μέσω Termux) πήρε κανονική απάντηση από το `os-helper`, παρόλο που το
-`ufw` rule έλεγε ρητά μόνο `172.16.0.0/12` (Docker range) allowed.
+Verification test (curl από το κινητό μέσω Termux, διαφορετική Tailscale συσκευή) έδειξε ότι το port 8787 **παρέμενε προσβάσιμο** παρά το `ufw` rule. Αιτία: Tailscale `ShieldsUp: false` (επιβεβαιωμένο μέσω `tailscale debug prefs`) — το Tailscale έχει δικό του netfilter/routing layer (`NetfilterMode: 2`) που διαχειρίζεται incoming tailnet κίνηση **ανεξάρτητα** από το OS-level `ufw`, πριν καν η κίνηση περάσει από το filtering chain που θα έβλεπε "κανονική" εξωτερική κίνηση.
 
-**Αιτία:** Tailscale `ShieldsUp: false` (επιβεβαιωμένο μέσω `tailscale debug prefs`). Το Tailscale
-έχει δικό του netfilter/routing layer (`NetfilterMode: 2`) που διαχειρίζεται incoming tailnet
-κίνηση ανεξάρτητα από το OS-level `ufw` — η κίνηση μέσω `tailscale0` δεν περνάει από το ίδιο
-filtering chain που θα περνούσε "κανονική" εξωτερική κίνηση σε άλλα interfaces.
+### Απόφαση: αποδεκτό ως έχει
 
-**Απόφαση: αποδεκτό ως έχει, όχι bug προς διόρθωση.** Το πραγματικό access-control boundary για
-το os-helper (και, βασικά, για κάθε service σε αυτό το host) είναι και παραμένει το Tailscale
-tailnet membership αυτό καθαυτό — μόνο οι 3 δικές μας συσκευές (homeserver, desktop, κινητό)
-μπορούν να το φτάσουν, ίδιο μοντέλο με Jellyfin/Vaultwarden/Portainer/όλα τα υπόλοιπα services
-του stack. Το `ufw` rule παραμένει στη ρύθμιση ως δεύτερο layer defense — θα ενεργοποιούνταν αν
-ποτέ αλλάξει η Tailscale ρύθμιση (π.χ. αν κάποιος ενεργοποιήσει `--accept-routes` από άλλη
-συσκευή, ή αν προστεθεί νέος χρήστης/συσκευή στο tailnet) — απλά δεν είναι το ενεργό layer σήμερα.
+Το πραγματικό access-control boundary για το `os-helper` (και για κάθε service σε αυτό το host) είναι και παραμένει το Tailscale tailnet membership αυτό καθαυτό — μόνο οι 3 δικές μας συσκευές (homeserver, desktop, κινητό) μπορούν να το φτάσουν, ίδιο μοντέλο με κάθε άλλο service του stack. Το `ufw` rule παραμένει σαν δεύτερο layer defense, θα ενεργοποιούνταν αν ποτέ αλλάξει η Tailscale ρύθμιση.
 
-Δύο εναλλακτικές αξιολογήθηκαν και απορρίφθηκαν για τώρα:
-- **`tailscale up --shields-up`** — θα έλυνε το πρόβλημα, αλλά είναι global policy change (μπλοκάρει
-  ΟΛΗ την incoming tailnet κίνηση σε αυτό το host, όχι μόνο port 8787) — μεγαλύτερη αλλαγή απ' όσο
-  χρειάζεται για το συγκεκριμένο θέμα, θα επηρέαζε πιθανή μελλοντική χρήση άλλων services.
-- **Tailscale ACLs** (μέσω admin console) — πιο σωστό/στοχευμένο, αλλά χρειάζεται web dashboard
-  access, ξεχωριστό μελλοντικό task αν χρειαστεί ποτέ πιο αυστηρό per-service tailnet policy.
+**Εναλλακτικές που αξιολογήθηκαν και απορρίφθηκαν:**
+- `tailscale up --shields-up` — θα έλυνε το πρόβλημα, αλλά global policy change (μπλοκάρει ΟΛΗ την incoming tailnet κίνηση σε αυτό το host), μεγαλύτερη αλλαγή απ' όσο χρειάζεται.
+- Tailscale ACLs (admin console) — πιο σωστό/στοχευμένο, χρειάζεται web dashboard access, ξεχωριστό μελλοντικό task αν χρειαστεί ποτέ πιο αυστηρό per-service policy.
 
-Δεν χρειάζεται περαιτέρω ενέργεια σήμερα — καταγράφεται ρητά ώστε το "ufw ενεργό" να μην παρεξηγηθεί
-μελλοντικά ως "port 8787 προστατευμένο από tailnet-level access", κάτι που δεν είναι.
+---
+
+## Γενικό μοτίβο bugs σήμερα (2026-08-03) — άξιζε να καταγραφεί ξεχωριστά
+
+Τρία ξεχωριστά bugs σήμερα (manifest format, `sys.path` depth, `~` expansion) ήταν όλα παραλλαγές του **ίδιου** υποκείμενου λάθους: λανθασμένη υπόθεση για το πώς μοιάζει το filesystem/environment μέσα στον orchestrator container, χωρίς επιβεβαίωση πριν γραφτεί ο κώδικας. Το manifest-format bug μάλιστα ήταν ήδη καταγεγραμμένο από το `summarize_inbox` session και ξανασυνέβη.
+
+**Δράση:** προστέθηκε μόνιμο "Adding a New Tool — Checklist" section στο README.md, με ρητά βήματα επιβεβαίωσης (directory layout, manifest format, `~` resolution, πότε χρειάζεται `--force-recreate`) πριν γραφτεί νέος κώδικας.
+
+---
+
+## Γνωστά, καταγεγραμμένα ανοιχτά θέματα
+
+Δεν είναι bugs — καταγεγραμμένα ρητά ώστε να μην ξαναανακαλυφθούν από την αρχή:
+
+- **`secrets(.env): FAIL` σε backup run `backup_2026-08-02_0047`** — το `.env` δεν βρέθηκε στο αναμενόμενο path τη στιγμή εκείνου του run (εντοπίστηκε μέσω του νέου `list_recent_backups`). Αν επαναληφθεί, το πιο πρόσφατο backup δεν θα έχει αντίγραφο secrets. Δεν διερευνήθηκε βαθύτερα.
+- **Πιθανό race condition σε concurrent `protocol_permafrost` runs** — δύο backup runs έτρεξαν πολύ κοντά χρονικά (`22:03`/`22:04`, 1 Αυγούστου) και ο ένας πάτησε πάνω στα αρχεία του άλλου (`tar: file changed as we read it`, ορατό στο `backup.log`). Πιθανό missing lock/mutex. Δεν διερευνήθηκε.
+- **Επιβεβαίωση αν έγινε revoke του `OPENAI_API_KEY`** — ανοιχτό από 2026-08-01 (εμφανίστηκε σε καθαρό κείμενο σε chat μέσω `docker inspect ... Config.Env` κατά το debugging). Ακόμα δεν ελέγχθηκε.
+- **`ufw`/Tailscale interaction** — βλ. ενότητα παραπάνω, τεκμηριωμένο ρητά ως αποδεκτό, όχι bug.
+
+---
+
+## Επόμενο στη σειρά (προτεραιότητα)
+
+1. **Disk-space proactive alert** — host-side systemd timer, ανεξάρτητο από AI layer. Το πιο "θα σε γλυτώσει από πρόβλημα" item στη λίστα.
+2. **`os-helper` write set** — allowlisted `systemctl restart <unit>`, confirm-required. Φυσική επέκταση πάνω στο ήδη-χτισμένο read-only daemon.
+3. **`reconnect_network`** — τρίτο repair_type, χρειάζεται πρώτα proxy decision (κανένα proxy δεν έχει `NETWORKS=1` σήμερα).
+4. **Email/daily reports ("morning health digest")** — δεν χρειάζεται απαραίτητα SMTP: μπορεί να είναι systemd timer που τρέχει τα ήδη υπάρχοντα read-only tools (`list_recent_backups`, `get_disk_health`, `get_failed_units`) και γράφει περίληψη κάπου ορατό. Ιδέα προέκυψε 2026-08-03, μετά την τυχαία ανακάλυψη του `.env` FAIL μέσω του `list_recent_backups` — το gap που καλύπτει: κανένα σημερινό tool δεν σε ειδοποιεί proactively, όλα είναι pull (ρωτάς εσύ).
+5. **Database editing/rollback** — χρειάζεται δικό του ασφαλή σχεδιασμό, TOTP-level confirmation. Αξιολογήθηκε ρητά ως **high risk / low reward** στο τρέχον στάδιο — παραμένει χαμηλή προτεραιότητα σκόπιμα, όχι απλά αναβλημένο.
+
+### Μικρές `os-helper` επεκτάσεις (καταγεγραμμένες ιδέες, 2026-08-03)
+
+Ίδιο daemon/pattern με το ήδη υπάρχον read-only `os-helper`:
+
+- **`get_listening_ports`** (`ss -tlnp`) — ψηλή προτεραιότητα ανάμεσα στις μικρές ιδέες, θα έδειχνε immediate verification για πράγματα σαν το σημερινό `ufw`/port-8787 finding χωρίς χειροκίνητο SSH digging.
+- **`get_memory_pressure`** (OOM killer events, `dmesg | grep -i "killed process"`) — θα εξηγούσε "γιατί έπεσε το X" σε περιπτώσεις που σήμερα φαίνονται απλά σαν "restarted".
+- **`get_recent_boot_history`** (`journalctl --list-boots`) — πότε έγινε reboot/crash.
+- **`get_journal_errors`** (`journalctl -p err -b`) — host-level errors, συμπληρώνει το Loki/Grafana (που βλέπει μόνο container logs).
+
+**Ρητά εκτός scope:** process listing / `/proc` introspection γενικά — surveillance-adjacent χωρίς σαφές use case, θα χαλούσε το στενό, στοχευμένο scope που είναι το δυνατό σημείο του `os-helper` σήμερα.
+
+### Θεωρήθηκε, αποφασίστηκε ρητά ΟΧΙ τώρα
+
+- **Remote reboot μέσω JARVIS** — αξιολογήθηκε 2026-08-03. Πραγματικό ρίσκο: differs από `restart_container` (containerized, μικρό blast radius) γιατί αφορά το ίδιο το host — αν κάτι πάει στραβά μετά το reboot (π.χ. network config), πλήρης απώλεια πρόσβασης μέχρι physical access. Αν ποτέ χτιστεί, χρειάζεται επίπεδο σοβαρότητας αντίστοιχο του DAYBREAK/BLACKOUT, όχι τυπικό `/confirm` — πιθανόν με προ-έλεγχο ότι το Tailscale θα ξανασηκωθεί σωστά, ίσως watchdog. Δεν είναι στο roadmap σήμερα.
+- **Configurable μοντέλο (`JARVIS_MODEL` env var)** — καταγεγραμμένη σκέψη, όχι επείγον. Όταν χρειαστεί: μικρή αλλαγή (env var στο `.env` αντί για hardcoded string στο `main.py`), αλλά σύσταση για A/B test tool-calling reliability πριν γίνει μόνιμη αλλαγή — το GPT-4o διαλέχτηκε συνειδητά γι' αυτό το κριτήριο, νεότερο μοντέλο δεν είναι αυτόματα καλύτερο εκεί.
+- **Database query/read tool** (`query_audit_log`) — θα ήταν χαμηλού ρίσκου αν χτιζόταν, αλλά ρητά αποφασίστηκε να μείνει έξω μαζί με το edit/rollback item — δεν υπάρχει σήμερα πραγματική ανάγκη, low reward.
+
+---
+
+## Security/production-learning track
+
+Παράλληλο track, μαθησιακή αξία (PJPT/PNPT):
+
+1. **Docker Policy Broker + rootless Docker** ✅ πλήρως ολοκληρωμένο (2026-08-01/02).
+2. **os-helper privilege separation model** ✅ ολοκληρωμένο (2026-08-03) — καλό, πρόσφατο παράδειγμα `NoNewPrivileges` interaction με sudo/capabilities, privileged-collector-with-shared-snapshot pattern.
+3. **`ufw` + Tailscale netfilter interaction** ✅ διερευνήθηκε (2026-08-03) — καλό παράδειγμα overlay-network-vs-host-firewall αλληλεπίδρασης, σχετικό θέμα για PJPT/PNPT.
+4. **Trivy** — CVE scanning σε images, χαμηλό effort, δεν έχει ξεκινήσει.
+5. **AIDE / File Integrity Monitoring** — μειωμένη πρακτική αξία μετά το mount split (ήδη `:ro`), δεν έχει ξεκινήσει.
+
+**Αποφασισμένο να μπει αργότερα, όχι τώρα:** Wazuh (RAM-heavy, περιμένει hardware upgrade), Suricata/Zeek (χρειάζεται managed switch), VLAN segmentation (χρειάζεται managed switch), Traefik (Tailscale ήδη καλύπτει την αξία του), CrowdSec (χαμηλή αξία χωρίς public-facing services), Vault (overkill), canary tokens (χαμηλή προτεραιότητα).
+
+---
+
+## Ανοιχτά ερωτήματα / decisions για επόμενο session
+
+- Πότε αξίζει το hardware upgrade (custom build, RTX 2060/3060, €400-600) — π.χ. "όταν θέλουμε Wazuh" ως practical trigger αντί για αόριστο timeline.
+- Πότε αξίζει να ξεκινήσει το custom broker/agents project — π.χ. αν αλλάξει το threat model.
+- Αν το morning health digest (βλ. "Επόμενο στη σειρά") τελικά αντικαταστήσει ή απλά συμπληρώσει το ξεχωριστό email/reports item.
