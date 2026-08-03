@@ -1,6 +1,6 @@
 # JARVIS Home Server — User Guide
 
-Your home server with a local-first AI assistant. This document is the user guide — what you can do, how to talk to JARVIS, what each emergency protocol does, and how to back up / restore. For technical internals (architecture, code), see the comments inside the files themselves.
+Your home server with a local-first AI assistant. This document is the user guide — what you can do, how to talk to JARVIS, what each emergency protocol does, and how to back up / restore. For technical internals (architecture, code, bugs found/fixed, open items), see `STATUS.md`.
 
 ---
 
@@ -10,13 +10,16 @@ Your home server with a local-first AI assistant. This document is the user guid
 2. [What's Running on the Server](#whats-running-on-the-server)
 3. [Talking to JARVIS](#talking-to-jarvis)
 4. [JARVIS Tools](#jarvis-tools)
-5. [Emergency Protocols](#emergency-protocols)
-6. [Kill Switch](#kill-switch)
-7. [Backup & Restore](#backup--restore)
-8. [Sandbox — Running Code](#sandbox--running-code)
-9. [Security — What's Protected](#security--whats-protected)
-10. [Common Issues](#common-issues)
-11. [Roadmap](#roadmap)
+5. [Host Diagnostics (os-helper)](#host-diagnostics-os-helper)
+6. [Observability (Loki + Grafana)](#observability-loki--grafana)
+7. [Emergency Protocols](#emergency-protocols)
+8. [Kill Switch](#kill-switch)
+9. [Backup & Restore](#backup--restore)
+10. [Sandbox — Running Code](#sandbox--running-code)
+11. [Security — What's Protected](#security--whats-protected)
+12. [Adding a New Tool — Checklist](#adding-a-new-tool--checklist)
+13. [Common Issues](#common-issues)
+14. [Roadmap](#roadmap)
 
 ---
 
@@ -26,6 +29,7 @@ Your home server with a local-first AI assistant. This document is the user guid
 |---|---|
 | SSH | `ssh nickchronis2004@100.103.21.5` |
 | JARVIS chat (Open WebUI) | `http://100.103.21.5:3000` |
+| Grafana (logs) | `http://100.103.21.5:3002` |
 | Vaultwarden (passwords) | `https://homeserver.tailec97a4.ts.net` |
 | Portainer (Docker UI) | `https://100.103.21.5:9443` |
 | Jellyfin (media) | `http://100.103.21.5:8096` |
@@ -34,7 +38,7 @@ Your home server with a local-first AI assistant. This document is the user guid
 | Files (Samba) | `\\100.103.21.5\media` |
 | Tailscale hostname | `homeserver.tailec97a4.ts.net` |
 
-Everything is only reachable through your Tailscale VPN — no ports are forwarded to the public internet.
+Everything is only reachable through your Tailscale VPN — no ports are forwarded to the public internet. This remains true even where a host-level firewall (`ufw`) rule looks narrower than that on paper — see the note in [Security](#security--whats-protected).
 
 ---
 
@@ -55,7 +59,13 @@ Everything is only reachable through your Tailscale VPN — no ports are forward
 - **Open WebUI** — the chat interface where you talk to JARVIS
 - **Ollama** — local model (available for basic chat, but JARVIS uses GPT-4o for tool-calling due to reliability)
 
-**Networking**: Tailscale VPN for remote access, a separate isolated Docker network (`jarvis-ai-net`) for the AI stack.
+**Observability**:
+- **Loki + Promtail + Grafana** — centralized log viewing across every container, separate isolated stack, see [Observability](#observability-loki--grafana)
+
+**Host-level diagnostics**:
+- **os-helper** — a small systemd service (not a container) giving JARVIS visibility into the host OS itself (failed services, disk health, network state) — see [Host Diagnostics](#host-diagnostics-os-helper)
+
+**Networking**: Tailscale VPN for remote access, a separate isolated Docker network (`jarvis-ai-net`) for the AI stack, plus three more dedicated internal networks for the Docker Policy Broker proxies.
 
 ---
 
@@ -69,11 +79,13 @@ Open Open WebUI (`http://100.103.21.5:3000`) and just type normally, in English 
 - "How much disk space is left?"
 - "Show me jellyfin's logs"
 - "Search for a file called bunny"
-- "What are the largest files on the media drive?"
 - "Restart jellyfin"
-- "Is everything OK with the system?" / "check the docker disk usage"
-- "Clean up the docker disk" / "free up build cache space now"
+- "Is everything OK with the system?"
 - "Run a backup now" / "activate protocol permafrost"
+- "Show me recent backups"
+- "Any failed services on the host?"
+- "Are my disks healthy?"
+- "Check the host's network state"
 - "Activate emergency lockdown" / "activate protocol snowfall"
 
 **Important — for actions that change something** (restarting a container, backups, etc.), JARVIS will **always** ask for confirmation before proceeding. You must reply with **exactly** `/confirm` (nothing else — not "yes" or "go ahead") within 2 minutes. This is intentional: the system recognizes `/confirm` before the message ever reaches the AI model, so there's no risk of a misread confirmation.
@@ -96,6 +108,11 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 | `get_container_logs` | Recent logs from a container |
 | `search_files` | Search for files in media (movies, shows, music) |
 | `list_large_files` | The largest files in media (useful for freeing space) |
+| `list_recent_backups` | Lists recent backup runs — size, which Docker volumes each includes, whether it synced to the external USB drive, and whether any component failed |
+| `summarize_inbox` | Reads your university mailbox (read-only, IMAP) and gives a summary — defaults to "since yesterday" |
+| `get_failed_units` | Host-level (not container-level) systemd services currently in a failed state — see [Host Diagnostics](#host-diagnostics-os-helper) |
+| `get_disk_health` | SMART health per physical drive, plus filesystem usage — see [Host Diagnostics](#host-diagnostics-os-helper) |
+| `get_network_state` | Host network interfaces and default route — see [Host Diagnostics](#host-diagnostics-os-helper) |
 
 ### Confirm-required (need `/confirm`)
 
@@ -104,7 +121,7 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 | `restart_container` | Restarts a container | jellyfin, pihole, samba, uptime-kuma |
 | `stop_container` | Stops a container | same list |
 | `start_container` | Starts a stopped container | same list |
-| `repair_system` | Runs a specific pre-approved repair: `clean_docker_disk` (dangling images, stopped containers >24h, unused networks, build cache >24h — **currently unavailable**, needs Docker permissions not yet opened, see `STATUS.md`) or `clean_build_cache` (all build cache, any age — always safe, just slower next `docker build`) | — |
+| `repair_system` | Runs a specific pre-approved repair: `clean_docker_disk` (**currently unavailable**, needs Docker permissions not yet opened, see `STATUS.md`) or `clean_build_cache` (all build cache, any age — always safe) | — |
 | `protocol_permafrost` | Full system backup | — (see [Backup & Restore](#backup--restore)) |
 
 **Vaultwarden is never a valid target** for any of these — it doesn't even appear on the allowed-targets list. JARVIS cannot touch it in any way.
@@ -119,6 +136,35 @@ Every container-based action has a **120-second cooldown** — if you just resta
 
 ---
 
+## Host Diagnostics (os-helper)
+
+Everything above (except `os-helper`'s own three tools) sees the world through Docker — containers, volumes, images. **`os-helper`** is different: it's a small, separate systemd service running directly on the host (not in a container), giving JARVIS visibility into the underlying operating system itself.
+
+**Why a separate host service, not another container?** Some of what it checks (systemd's own state) needs access that would otherwise mean giving a container much broader visibility into the host than is comfortable — so instead, a narrowly-scoped host service exposes just three fixed, read-only questions over a local connection, and nothing else.
+
+**What you can ask:**
+- "Any failed services on the host?" → `get_failed_units` — distinct from container health; this is about the host's own systemd services (e.g. if a background system service crashed)
+- "Are my disks healthy?" → `get_disk_health` — SMART status per physical drive, not just free space (which `check_disk_space` already covers). Disk health data refreshes every 5 minutes rather than being queried live — the response tells you how old the data is
+- "What's the network state?" → `get_network_state` — host network interfaces and routing, filtered to just the physically meaningful ones (Docker's internal per-container networking is deliberately excluded — that's a lot of noise you don't usually need)
+
+**Known limitation:** the external USB backup drive doesn't support SMART health checks at all — the USB enclosure's chipset doesn't pass that data through, confirmed on the hardware itself. `get_disk_health` reports this cleanly as an error for that drive rather than pretending it's fine.
+
+This is read-only today — it can't restart anything or change host configuration. A future addition (not yet built) may let JARVIS restart a small, explicitly-allowed set of host-level services, following the same confirm-required pattern as container restarts.
+
+---
+
+## Observability (Loki + Grafana)
+
+A separate stack (Loki + Promtail + Grafana) collects logs from every container into one place, so you don't have to check each container's logs individually.
+
+**Access:** `http://100.103.21.5:3002` (log in, then Dashboards → JARVIS → "JARVIS — Log Overview")
+
+What you get: live-tailed logs from every container, a log-volume-over-time chart per container, and a filtered view of error-looking lines. Log history is kept for 7 days.
+
+This is a separate, independent stack from JARVIS itself — you view it directly in a browser, JARVIS doesn't currently query it through chat (though `get_container_logs` gives you a chat-accessible way to check a single container's recent logs, which covers most day-to-day needs without going to Grafana).
+
+---
+
 ## Emergency Protocols
 
 Three levels of response if something goes wrong, from mildest to most drastic.
@@ -127,7 +173,7 @@ Three levels of response if something goes wrong, from mildest to most drastic.
 
 **How to activate:** From chat, just tell JARVIS (e.g. "activate protocol snowfall" or "something seems off, lock the system down"). Executes **instantly, no confirmation needed** — it's intentionally a defensive/reversible action, so no delay is required.
 
-**What it does:** Disables all write actions (restart/stop/start container, backup) system-wide. Read-only diagnostics (container status, disk space, logs, etc.) stay fully available.
+**What it does:** Disables all write actions (restart/stop/start container, backup) system-wide. Read-only diagnostics (container status, disk space, logs, host diagnostics, etc.) stay fully available.
 
 **When to use it:** If you suspect something abnormal is happening — e.g. messages you don't recognize, tools being called that you didn't ask for, or you just want to proactively "freeze" the system while you investigate.
 
@@ -141,7 +187,7 @@ Three levels of response if something goes wrong, from mildest to most drastic.
 ```
 Not available via chat (makes sense — if you stop the orchestrator, there's no chat left to send a command through).
 
-**What it does:** Completely stops the `jarvis-orchestrator` container. JARVIS stops responding to anything — no AI functionality at all. Core services (Jellyfin, Pi-hole, Samba, Vaultwarden, Portainer, Uptime Kuma) **remain unaffected** and keep running normally.
+**What it does:** Completely stops the `jarvis-orchestrator` container. JARVIS stops responding to anything — no AI functionality at all. Core services (Jellyfin, Pi-hole, Samba, Vaultwarden, Portainer, Uptime Kuma) **remain unaffected** and keep running normally. `os-helper` (the host service) and the Loki/Grafana stack also keep running — they don't depend on the orchestrator at all.
 
 **When to use it:** More severe than SNOWFALL — if you want to shut JARVIS down entirely (e.g. debugging, suspicious behavior that lockdown alone doesn't stop, or you want to make code changes without it running at the same time).
 
@@ -200,6 +246,10 @@ Takes 1-2 minutes. 5-minute cooldown before you can run it again.
 
 **Note on backup location:** these two methods write to different (but both fully valid) locations. Running it manually from SSH uses `~/jarvis-backups/` by default. Running it through JARVIS uses `~/jarvis/jarvis-backups/` instead — this is intentional, driven by how the orchestrator's container filesystem is mounted. Both are correct; just check the matching folder for the run you're looking for.
 
+### Checking recent backups
+
+Ask JARVIS "show me recent backups" (`list_recent_backups`) — gives you, per run: size, which Docker volumes it includes, whether it synced to the external USB, and whether any step (config, secrets, logs, or a specific volume) failed. This is the fastest way to spot a bad backup without SSH-ing in and reading `backup.log` by hand.
+
 ### What the backup includes
 
 - **JARVIS config**: policy.yaml, tools, scripts (without secrets)
@@ -237,6 +287,7 @@ docker volume ls -q | grep test_restore_ | xargs -r docker volume rm
 **Safety net built in**: if something already exists where the restore is about to write (e.g. you're restoring onto an already-working system), the script **first** saves the current content to `~/jarvis-restore-safety-backups/` before overwriting it. Nothing is ever lost silently.
 
 ---
+
 ## Sandbox — Running Code
 
 JARVIS can execute Python code on your behalf, fully isolated from the rest of the server.
@@ -292,16 +343,40 @@ No orchestrator restart needed — the next sandbox run just picks up the new im
 
 ---
 
-
 ## Security — What's Protected
 
 - **No direct Docker socket access.** The orchestrator has no mount of `/var/run/docker.sock`. Instead it talks to three separate, narrowly-scoped `docker-socket-proxy` instances — a **read** proxy (status/logs/disk usage, no writes possible), a **lifecycle** proxy (only start/stop/restart, no read access), and a **maintenance** proxy (for the sandbox and backups, which need to create containers). Each tool only gets the proxy it actually needs.
+- **`os-helper` (host diagnostics) is separately isolated.** It's read-only, runs as a dedicated unprivileged user with no escalation path of any kind (`NoNewPrivileges=true` — this holds even against `sudo`, so there's genuinely no way for that service to gain elevated access even if something in it were compromised). The one thing it reports that *does* need elevated access — disk SMART health — is collected by a completely separate, privileged process that runs briefly, writes one file, and exits; the main service only ever reads that file, never touches the disk directly.
 - **Vaultwarden is completely off-limits** to every tool, every operation, at every stage — it doesn't even appear on any allowed-targets list. JARVIS cannot touch it in any way.
 - **Confirm-required actions** need an explicit `/confirm` — not natural language, so there's no risk of a misunderstood or accidental confirmation.
 - **Emergency lockdown (SNOWFALL) cannot be undone through chat** — only DAYBREAK with SSH access.
 - **Every action is logged** to an audit log (SQLite, `logs/audit.db`) — tier, status, duration, error codes, whether it was confirmed.
 - **Every write action is independently verified** — e.g. `restart_container` doesn't just trust that the command "didn't error," it asks the Docker daemon again to confirm the state actually changed.
 - **Secrets are never in plaintext logs or mixed into any other data** — the `.env` file always gets its own restrictive permissions (600), kept separate from everything else in a backup.
+- **Host firewall (`ufw`) is active**, with SSH and the `os-helper` port scoped to only what needs them. Worth knowing: Tailscale traffic (i.e. anything from your own devices on your tailnet) currently bypasses this `ufw` filtering at the OS level — this is a Tailscale networking detail, not a gap in `ufw` itself. In practice this doesn't widen your actual exposure: Tailscale membership (only your own devices) *is* and always has been the real access boundary for everything on this server, `ufw` or not — see `STATUS.md` for the full technical explanation if you want it.
+
+---
+
+## Adding a New Tool — Checklist
+
+A few mistakes have shown up more than once while adding new tools, all from *assuming* something about the environment instead of confirming it first. Run through this before writing a new tool, and you'll skip the debugging loop these caused:
+
+1. **Manifest format.** `privilege_tier` (not `tier`), and `parameters` must be a **list** of `{name, type, description, required}` objects — even when there are no parameters at all, it's `parameters: []`, never `parameters: {}`. Copy an existing working manifest (`tools/restart_container/manifest.yaml`) as your starting template rather than writing one from scratch.
+2. **Don't assume the container's directory layout — check it.** `tools/` and `lib/` are sibling directories under `/app/jarvis/` inside the orchestrator container (two separate mounts), not nested inside each other. If your tool needs to import something from `lib/`, confirm the real path first:
+   ```bash
+   docker exec jarvis-orchestrator ls -la /app/jarvis/
+   ```
+3. **Don't assume `~` means what you think inside the container.** The orchestrator process runs as root inside its container, so `~` resolves to `/root`, not to your own SSH home directory — even though a standalone SSH test of the same script (`~` = `/home/nickchronis2004`) would look like it works. Use an explicit, known container path instead (e.g. `/app/jarvis/jarvis-backups`), or read it from an environment variable with that as the fallback.
+4. **`docker restart` is not always enough.** A tool's own `script.py`/`manifest.yaml` changes only need `docker restart jarvis-orchestrator` (they're live-mounted `:ro`). But anything that changes the **compose file itself** — a new env var, `extra_hosts`, a new volume mount — needs a full recreate:
+   ```bash
+   docker compose -f docker-compose.proxies.yml up -d --force-recreate jarvis-orchestrator
+   ```
+5. **Test the tool standalone before testing it through chat.** Reproduce exactly what the orchestrator does — arguments are passed as `TOOL_ARG_<name>` environment variables, not command-line args:
+   ```bash
+   docker exec -e TOOL_ARG_confirmed=false jarvis-orchestrator python3 /app/jarvis/tools/<name>/script.py
+   ```
+   If this doesn't return clean JSON with exit code 0, chat won't work either — and this is much faster to iterate on than going through Open WebUI each time.
+6. **If something fails in chat with a vague error, check `docker logs jarvis-orchestrator --tail 50` first**, not the chat transcript — that's where the real Python traceback is. The chat response is JARVIS's natural-language gloss on the failure, not the failure itself.
 
 ---
 
@@ -316,21 +391,24 @@ If this happens *immediately* after JARVIS asked you to type `/confirm` (not a t
 Cooldown in effect (120s for containers, 300s for backup). Wait, or start a new chat.
 
 **Changes to `main.py` don't seem to take effect**
-`main.py` is baked into the Docker image (`COPY` in the Dockerfile) — it needs a full rebuild + recreate, not just `docker restart`. Since the Docker Policy Broker migration (2026-08-02), the orchestrator no longer mounts `/var/run/docker.sock` directly — it reaches Docker through three dedicated proxies instead (see [Security](#security--whats-protected)). The easiest way to recreate it correctly is via the compose file, which already has the right mounts and env vars:
+`main.py` is baked into the Docker image (`COPY` in the Dockerfile) — it needs a full rebuild + recreate, not just `docker restart`. The orchestrator no longer mounts `/var/run/docker.sock` directly — it reaches Docker through three dedicated proxies instead (see [Security](#security--whats-protected)). The easiest way to recreate it correctly is via the compose file, which already has the right mounts and env vars:
 ```bash
 cd ~/jarvis
 docker build --no-cache -t jarvis-orchestrator:latest -f orchestrator/Dockerfile orchestrator/
 docker compose -f docker-compose.proxies.yml up -d --force-recreate jarvis-orchestrator
 ```
-Changes inside `~/jarvis/tools/...` or to `backup.sh` **don't** need a rebuild — they're live-mounted (`:ro`), a plain `docker restart jarvis-orchestrator` is enough.
+Changes inside `~/jarvis/tools/...`, `~/jarvis/lib/...`, or to `backup.sh` **don't** need a rebuild — they're live-mounted (`:ro`), a plain `docker restart jarvis-orchestrator` is enough. See the [checklist above](#adding-a-new-tool--checklist) for when a full recreate (not just a rebuild) is separately needed.
 
-**Note**: `docker compose up -d` alone does not always pick up changed environment variables on an already-running container — if an env var change (e.g. in `docker-compose.proxies.yml`) doesn't seem to apply, use `--force-recreate`, or to be certain, `stop` + `rm` + `up -d` explicitly.
+**Note**: `docker compose up -d` alone does not always pick up changed environment variables or compose-level directives (`extra_hosts`, new mounts) on an already-running container — use `--force-recreate`, or to be certain, `stop` + `rm` + `up -d` explicitly.
 
 **Samba write permissions**
 The `dperson/samba` image runs as an internal user (uid 100), not the host user. Fix: `chmod -R 777 ~/media` (not ideal long-term, but works).
 
 **Backup step `jarvis-config: FAIL`, or a backup directory that's unexpectedly huge (GBs instead of tens of MB)**
 Fixed 2026-08-02 — was a self-referential tar bug: `backup_config()` archived all of `~/jarvis`, which includes `jarvis-backups/` itself, so it kept trying to include its own still-being-written output file, growing without bound on every failed retry (one instance reached 35GB before being caught). If you ever see this again on an older/restored copy of `backup.sh`, make sure it excludes the backup output directory by name. If a giant leftover backup directory shows up, it's safe to delete (`sudo rm -rf`, since files are owned by root when created via JARVIS) — it's not real data, just the runaway archive.
+
+**`get_disk_health` reports one drive as unhealthy/errored that you know is fine**
+If it's the external USB backup drive specifically: known limitation, not a bug — see [Host Diagnostics](#host-diagnostics-os-helper).
 
 ---
 
@@ -339,19 +417,16 @@ Fixed 2026-08-02 — was a self-referential tar bug: `backup_config()` archived 
 Priority order for next steps:
 
 1. ~~Backups (deterministic, script-based)~~ ✅ Done
-2. ~~Sandbox~~ ✅ Done — isolated gVisor container for running Python code through JARVIS
+2. ~~Sandbox~~ ✅ Done
 3. ~~Unified diagnostics (`diagnose_system`) and disk cleanup (`repair_system`)~~ ✅ Done
-4. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other (planned repair_system addition, not yet built)
-5. **Email/daily reports** — read-only, based on the audit log
-6. **Database editing/rollback** — needs its own careful design (likely TOTP-level confirmation, same reasoning as the future reboot/shutdown tools)
+4. ~~Docker Policy Broker (no more direct docker.sock access)~~ ✅ Done
+5. ~~Loki + Grafana~~ ✅ Done
+6. ~~`list_recent_backups`~~ ✅ Done
+7. ~~`os-helper` (host OS diagnostics)~~ ✅ Done
+8. **Disk-space proactive alert** — host-side, independent of the AI layer, so it doesn't rely on you remembering to ask
+9. **`os-helper` write actions** — a small, explicitly-allowed set of `systemctl restart <service>` calls, confirm-required, same pattern as container restarts
+10. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other
+11. **Email/daily reports** — read-only summary of backup status, disk health, failed units, etc., delivered somewhere you'll actually see it each morning
+12. **Database editing/rollback** — needs its own careful, from-scratch safety design (likely TOTP-level confirmation, not the standard `/confirm`)
 
-**Parallel security/production-learning track** (added 2026-08-01), priority order:
-
-1. ~~**Docker Policy Broker + rootless Docker**~~ ✅ Done (2026-08-01/02) — the orchestrator no longer has any direct access to `docker.sock`. It reaches Docker through three dedicated, narrowly-scoped proxies instead (read-only, lifecycle, maintenance — see [Security](#security--whats-protected)), each only allowing the specific API operations its tools actually need.
-2. **Trivy** — container image vulnerability scanning (CVEs)
-3. **AIDE / File Integrity Monitoring** — alert if critical files change (`policy.yaml`, `backup.sh`, `.env`)
-4. **Loki + Grafana** — centralized logging across all containers
-
-Deferred until hardware upgrade or different network topology: Wazuh (SIEM/HIDS, RAM-heavy), Suricata/Zeek (needs a span/mirror port), VLAN segmentation (needs a managed switch). See `STATUS.md` for full reasoning and current state of every item on this list.
-
-Other ideas under consideration: a custom broker with sanitized, high-level endpoints instead of category-level Docker API passthrough (bigger future project, see `STATUS.md`), and a full restore flow through JARVIS (after a serious safety redesign, since it's deliberately SSH-only for now).
+See `STATUS.md` for the full technical history, every bug found and fixed along the way, and the reasoning behind decisions not listed here.
