@@ -426,7 +426,5 @@ Priority order for next steps:
 8. **Disk-space proactive alert** — host-side, independent of the AI layer, so it doesn't rely on you remembering to ask
 9. **`os-helper` write actions** — a small, explicitly-allowed set of `systemctl restart <service>` calls, confirm-required, same pattern as container restarts
 10. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other
-11. **Email/daily reports** — read-only summary of backup status, disk health, failed units, etc., delivered somewhere you'll actually see it each morning
-12. **Database editing/rollback** — needs its own careful, from-scratch safety design (likely TOTP-level confirmation, not the standard `/confirm`)
 
 See `STATUS.md` for the full technical history, every bug found and fixed along the way, and the reasoning behind decisions not listed here.
