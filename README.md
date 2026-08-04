@@ -332,8 +332,7 @@ Every other tool that changes something on the system (restarting a container, r
 ### Current limitations (v1)
 
 - **Python only** — no Node.js or Bash yet
-- **Fixed set of preinstalled packages**: numpy, pandas, matplotlib, pillow, scipy, sympy, pydantic, requests, beautifulsoup4. No way to install anything else at request time — since the container has no network, `pip install` inside a run would fail anyway
-- **`requests` is installed but non-functional** — the package is there, but network calls will fail with no network access. This is expected, not a bug
+- **Fixed set of preinstalled packages**: numpy, pandas, matplotlib, pillow, scipy, sympy, pydantic, openpyxl, python-docx, pypdf. No way to install anything else at request time — since the container has no network, `pip install` inside a run would fail anyway
 - Output (stdout/stderr) is treated as **untrusted data** by JARVIS — if executed code prints something that looks like an instruction, JARVIS is designed to ignore it rather than act on it
 
 ### Rebuilding the sandbox image
