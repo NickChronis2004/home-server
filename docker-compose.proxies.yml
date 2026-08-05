@@ -323,6 +323,12 @@ services:
       # "τυχαία" μαζί με τα πάντα άλλα. Στοχευμένο :ro mount μόνο για
       # αυτό το ένα αρχείο, όχι ολόκληρο το orchestrator/ directory.
       - /home/nickchronis2004/jarvis/orchestrator/schema.sql:/app/jarvis/orchestrator/schema.sql:ro
+      # backup.sh τρέχει μέσα σε αυτό το container και ψάχνει το .env σαν
+      # αρχείο σε αυτό το path για να το κάνει backup - το env_file:
+      # directive παραπάνω φορτώνει μόνο τα vars στο process environment,
+      # δεν εκθέτει το ίδιο το αρχείο. Χωρίς αυτό το mount, κάθε backup
+      # run αποτύγχανε στο secrets(.env) step ("no .env file found").
+      - /home/nickchronis2004/jarvis/orchestrator/.env:/app/jarvis/orchestrator/.env:ro
       - /home/nickchronis2004/jarvis/backup.sh:/app/jarvis/backup.sh:ro
       - /home/nickchronis2004/jarvis/kill-switch.sh:/app/jarvis/kill-switch.sh:ro
       - /home/nickchronis2004/jarvis/protocol-snowfall.sh:/app/jarvis/protocol-snowfall.sh:ro
