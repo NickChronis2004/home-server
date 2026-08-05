@@ -225,8 +225,10 @@ services:
       - DISTRIBUTION=0
       - EXEC=0
       - GRPC=0
-      - IMAGES=0
-      - NETWORKS=0
+      # IMAGES/NETWORKS ανοιχτά: τα χρειάζεται το `docker system prune`
+      # (repair_system tool, clean_docker_disk) για image/network pruning.
+      - IMAGES=1
+      - NETWORKS=1
       - NODES=0
       - PLUGINS=0
       - SERVICES=0

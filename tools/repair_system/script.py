@@ -10,6 +10,7 @@ from docker_env import docker_env
 
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 
 PENDING_FILE = Path("/app/jarvis/logs/.pending_confirmation.json")
 PENDING_EXPIRY_SECONDS = 120
@@ -54,8 +55,13 @@ def clean_docker_disk():
       - --filter until=24h: only removes stopped containers/networks/images
         that have been unused for at least 24 hours - never something the
         user just stopped moments ago.
-    This also clears build cache, which is always safe (just rebuildable
-    intermediate layers, never user data).
+    Build cache is pruned separately via the raw Docker API (see
+    _build_prune_via_api) rather than relying on `docker system prune` to
+    clear it as a side effect - that side-effect path goes through the
+    buildx CLI/context resolution and 403s behind the maintenance proxy
+    (missing buildx builder-context state in this container). The API
+    call below does the same job cleanly, filtered to the same 24h age
+    window so behavior matches what the confirmation message promises.
     """
     result = subprocess.run(
         ["docker", "system", "prune", "--force",
@@ -65,31 +71,51 @@ def clean_docker_disk():
     if result.returncode != 0:
         return {"error": f"Cleanup failed: {result.stderr[:300]}"}
 
+    build_prune_error = None
+    try:
+        _build_prune_via_api(until=STOPPED_CONTAINER_AGE_FILTER)
+    except HTTPError as exc:
+        body = exc.read(500).decode("utf-8", errors="replace")
+        build_prune_error = f"HTTP {exc.code}: {body}"
+    except (URLError, TimeoutError, KeyError, ValueError, RuntimeError) as exc:
+        build_prune_error = str(exc)
+
     after = subprocess.run(
         ["docker", "system", "df", "--format", "{{json .}}"],
         capture_output=True, text=True, timeout=15, env=docker_env("read")
     )
     rows = [json.loads(line) for line in after.stdout.strip().split("\n") if line]
 
-    return {
+    result_dict = {
         "status": "success",
         "repair_type": "clean_docker_disk",
         "prune_output": result.stdout.strip()[:1000],
         "disk_usage_after": rows
     }
+    if build_prune_error:
+        # Containers/images/networks still got cleaned above - only the
+        # build cache portion failed, so report it as a partial issue
+        # rather than failing the whole repair.
+        result_dict["build_cache_warning"] = f"Build cache cleanup failed: {build_prune_error}"
+    return result_dict
 
 
-def _build_prune_via_api():
+def _build_prune_via_api(until=None):
     """
     Calls the Docker Engine API's POST /build/prune directly over the
-    maintenance proxy, instead of `docker builder prune` (buildx CLI).
-    Buildx keeps its own builder-context state (~/.docker/buildx) that
-    doesn't exist inside the orchestrator container, and its default
-    driver resolution expects a dedicated BuildKit container
-    (buildx_buildkit_default) that we don't have and don't want to
-    create just for this. The raw API endpoint does the same prune
-    without any of that - it's exactly what BUILD=1/POST=1 on the
-    maintenance proxy was already scoped for.
+    maintenance proxy, instead of `docker builder prune` (buildx CLI) or
+    relying on `docker system prune` to clear it as a side effect. Both
+    of those go through the buildx CLI/context resolution path, which
+    expects builder state (~/.docker/buildx) and a dedicated BuildKit
+    container (buildx_buildkit_default) that don't exist in this
+    container - that mismatch is what surfaces as a 403 from the proxy.
+    The raw API endpoint does the same prune without any of that - it's
+    exactly what BUILD=1/POST=1 on the maintenance proxy was already
+    scoped for.
+
+    until: optional Go duration string (e.g. "24h") to only prune cache
+    older than that age, matching the semantics of --filter until=24h.
+    If omitted, prunes all build cache regardless of age.
     """
     host = os.environ.get("DOCKER_MAINTENANCE_PROXY", "").strip()
     if not host:
@@ -99,7 +125,12 @@ def _build_prune_via_api():
     with urlopen(f"{base_url}/version", timeout=10) as r:
         api_version = json.load(r)["ApiVersion"]
 
-    req = Request(f"{base_url}/v{api_version}/build/prune?all=true", data=b"", method="POST")
+    query = "all=true"
+    if until:
+        filters = json.dumps({"until": [until]})
+        query = f"filters={quote(filters)}"
+
+    req = Request(f"{base_url}/v{api_version}/build/prune?{query}", data=b"", method="POST")
     with urlopen(req, timeout=60) as r:
         return json.load(r)
 
