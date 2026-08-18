@@ -528,7 +528,5 @@ Priority order for next steps:
 8. ~~`get_listening_ports` / `get_memory_pressure`~~ ✅ Done
 9. ~~`.env`/`policy.yaml` integrity check~~ ✅ Done
 10. ~~Morning health digest~~ ✅ Done
-11. **`os-helper` write actions** — a small, explicitly-allowed set of `systemctl restart <service>` calls, confirm-required, same pattern as container restarts
-12. **`reconnect_network`** — detect and fix containers on the same Docker network that can't reach each other
 
 See `STATUS.md` for the full technical history, every bug found and fixed along the way, and the reasoning behind decisions not listed here.
