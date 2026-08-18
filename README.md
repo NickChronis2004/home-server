@@ -16,6 +16,7 @@ Your home server with a local-first AI assistant. This document is the user guid
 8. [Kill Switch](#kill-switch)
 9. [Backup & Restore](#backup--restore)
 10. [Sandbox — Running Code](#sandbox--running-code)
+11. [Vulnerability Scanning (Trivy)](#vulnerability-scanning-trivy)
 11. [Security — What's Protected](#security--whats-protected)
 12. [File Integrity Check](#file-integrity-check)
 13. [Morning Digest](#morning-digest)
@@ -117,6 +118,7 @@ If 2 minutes pass without `/confirm`, the action is automatically cancelled and 
 | `get_network_state` | Host network interfaces and default route — see [Host Diagnostics](#host-diagnostics-os-helper) |
 | `get_listening_ports` | TCP ports currently listening on the host, with bind address and exposure (localhost-only / all-interfaces / specific-interface) — see [Host Diagnostics](#host-diagnostics-os-helper) |
 | `get_memory_pressure` | Recent OOM-kill events and current memory pressure (PSI) — explains a container "just restarting" with no obvious cause — see [Host Diagnostics](#host-diagnostics-os-helper) |
+| `trivy_scan` | Scans container images for known CVEs using Trivy. No target = scans every running container; give a container name to scan just that one. Summarized by severity (critical/high/medium), with top findings and which are fixable via a newer image |
 
 ### Confirm-required (need `/confirm`)
 
@@ -345,6 +347,49 @@ docker build -t jarvis-python-sandbox:v1 .
 ```
 
 No orchestrator restart needed — the next sandbox run just picks up the new image automatically.
+
+---
+
+## Vulnerability Scanning (Trivy)
+
+JARVIS can scan container images for known CVEs using [Trivy](https://trivy.dev).
+
+**Through JARVIS (chat):**
+
+You: scan all containers for vulnerabilities
+JARVIS: [runs it, returns a severity-sorted summary]
+
+You: scan jellyfin for vulnerabilities
+JARVIS: [scans just that one container]
+
+
+No confirmation needed — this is read-only, same reasoning as the other diagnostic tools.
+
+### How it works
+
+Each scan runs in a brand-new, disposable Trivy container (`docker run --rm`), routed through the maintenance proxy (same as `sandbox` and `protocol_permafrost` — Trivy needs to create its own container to inspect image layers, so it needs the same proxy access). Unlike the sandbox, this container does need network access, since Trivy has to fetch its CVE database.
+
+With no target given, every currently-running container is discovered dynamically (via `docker ps`, never hardcoded) and scanned **sequentially, not in parallel** — Trivy's on-disk cache doesn't handle concurrent writers safely, and parallel scans were found to deadlock against each other (2026-08-18 finding, see `STATUS.md`).
+
+### Caching — why the first scan is slow and the rest are fast
+
+Trivy's CVE database (~108MB) and its per-image analysis cache are persisted in a named Docker volume (`trivy-cache`), reused across every scan. In practice:
+
+- **First-ever full scan**: slow (several minutes) — downloads the CVE database once, and builds a per-image cache for each container the first time it's scanned.
+- **Every scan after that**: fast (seconds) — both caches are already warm.
+
+If a full scan seems unexpectedly slow, that's expected the very first time; if it stays slow on repeat runs, the cache may need clearing:
+```bash
+docker volume rm trivy-cache
+docker volume create trivy-cache
+```
+(Confirm no stray Trivy container is still holding the volume first — `docker ps -a --filter "volume=trivy-cache"` — or the `rm` will simply fail. This happened once already during development; see `STATUS.md`.)
+
+### What it reports
+
+For each container: counts of CRITICAL/HIGH/MEDIUM findings, how many have a fixed version already available, and the top findings (package, installed version, fixed version if any). Not the full raw Trivy report — that would be far too long for chat.
+
+**A high CVE count isn't automatically an emergency.** Some images (particularly ones bundling many language ecosystems, like Open WebUI) will show large numbers by nature of their dependency tree. What's worth actually acting on: findings with a fixed version available (`docker pull` + redeploy fixes them), and anything on a service that's network-reachable and holds sensitive data (Vaultwarden first). Findings with no fixed version yet are upstream-blocked — nothing to do but wait for the next base image release.
 
 ---
 

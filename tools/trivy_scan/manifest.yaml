@@ -1,0 +1,16 @@
+name: trivy_scan
+description: >
+  Scans container images for known CVEs (vulnerabilities) using Trivy.
+  Read-only — never modifies anything. If no target is given, scans every
+  currently running core-service container. If a target container name is
+  given, scans only that one. Results are summarized by severity
+  (critical/high/medium counts) with the top findings listed, not the full
+  raw report.
+privilege_tier: read-only
+parameters:
+  - name: target
+    type: string
+    description: >
+      Optional. Name of a single running container to scan (e.g. "jellyfin").
+      If omitted, scans all currently running containers.
+    required: false

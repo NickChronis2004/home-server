@@ -1,6 +1,6 @@
 # JARVIS Project Status
 
-Τελευταία ενημέρωση: 2026-08-03
+Τελευταία ενημέρωση: 2026-08-18
 
 Σκοπός αυτού του αρχείου: μία γρήγορη ματιά για το "τι έχουμε χτίσει, τι μένει, τι έχει αποφασιστεί αλλά όχι υλοποιηθεί" — χωρίς να χρειάζεται να ψάχνουμε παλιά chats. Ενημερώνεται στο τέλος κάθε session μαζί με το README.
 
@@ -26,6 +26,7 @@
 | **`get_listening_ports` / `get_memory_pressure`** | 2 νέα read-only `os-helper` endpoints — listening TCP ports (exposure classification), OOM events + PSI memory pressure | 2026-08-03 |
 | **`integrity_check.py`** | Standalone SSH-only script, SHA-256 baseline για `.env`/`policy.yaml`, explicit `--accept` flow — δεν είναι JARVIS tool | 2026-08-03 |
 | **Morning digest** | `morning_digest.py` + `jarvis-morning-digest.timer` (07:00 daily), ενώνει backups+failed_units+disk_health+integrity σε ένα markdown file | 2026-08-03 |
+| **`trivy_scan`** | CVE scanning σε container images μέσω Trivy, ephemeral container routed μέσω maintenance-proxy, cached DB+per-image analysis σε named volume (`trivy-cache`), sequential (όχι parallel) scanning | 2026-08-18 |
 
 ---
 
@@ -194,6 +195,35 @@ Standalone, **δεν** είναι JARVIS tool — τρέχει μόνο SSH, π�
 **Systemd:** `jarvis-morning-digest.service` (oneshot, τρέχει σαν `nickchronis2004`, **όχι** root — δεν χρειάζεται κανένα privilege) + `jarvis-morning-digest.timer` (`OnCalendar=*-*-* 07:00:00`, `Persistent=true` για catch-up αν το μηχάνημα ήταν off στις 07:00).
 
 **Real-world finding από το πρώτο πραγματικό run:** επιβεβαίωσε ξανά δύο ήδη γνωστά open items — το `secrets(.env):FAIL` στο `backup_2026-08-02_0047`, και πιθανή ένδειξη του καταγεγραμμένου race condition (δύο runs 1 λεπτό διαφορά, το ένα με 0 bytes). Δεν είναι νέα ευρήματα, αλλά επιβεβαιώνουν την αξία του digest — τα βλέπεις χωρίς να ρωτήσεις.
+
+---
+
+## 🔍 `trivy_scan` — τεχνικές λεπτομέρειες (2026-08-18)
+
+### Αρχιτεκτονική
+
+Ephemeral Trivy container (`docker run --rm`) per scan, routed μέσω `docker_env("maintenance")` — ίδιο proxy με sandbox/permafrost, γιατί χρειάζεται `docker run` (container-create), όχι μόνο read access. Σε αντίθεση με το sandbox, **χρειάζεται** network access (κατεβάζει CVE database), οπότε δεν παίρνει `--network=none`.
+
+CVE database + per-image analysis cache persist σε named volume (`trivy-cache`), mounted σε κάθε ephemeral container. Χωρίς target parameter, σκανάρει όλα τα τρέχοντα running containers (discovered δυναμικά μέσω `docker ps`, ποτέ hardcoded λίστα — ίδιο pattern με το volume discovery του `protocol_permafrost`).
+
+### Bugs βρέθηκαν + διορθώθηκαν
+
+- **🔴 Parallel scanning deadlock** (σοβαρό): Πρώτη υλοποίηση έτρεχε όλα τα containers **παράλληλα** (`ThreadPoolExecutor`) για ταχύτητα. Αποτέλεσμα: 13/16 scans απέτυχαν με `"cache may be in use by another process: timeout"` — το Trivy's on-disk cache (BoltDB) δεν υποστηρίζει concurrent writers. Fix: sequential scanning αντί για parallel. Με ήδη-cached DB, κάθε scan παίρνει ~0.75-1 δευτερόλεπτο, οπότε sequential παραμένει αρκετά γρήγορο (16 containers σε ~12 δευτερόλεπτα) — το parallelism δεν άξιζε την πολυπλοκότητα ενός lock/semaphore mechanism.
+- **Ορφανό container κρατούσε stale lock**: Μετά το πρώτο αποτυχημένο parallel run, ένα Trivy container (`unruffled_cohen`) έμεινε `Up` για 14+ λεπτά αντί να τερματίσει μέσω `--rm` — κρατούσε το lock πάνω στο `trivy-cache` volume, μπλοκάροντας **κάθε** επόμενη προσπάθεια (ακόμα και sequential, ακόμα και single-target). `docker volume rm` απέτυχε σιωπηλά-ενημερωτικά ("volume is in use") αντί να το αγνοήσει — αυτό ήταν το real diagnostic clue. Fix: `docker rm -f` στο ορφανό container πρώτα, μετά `docker volume rm` + `docker volume create` καθαρό restart. Γενικό μάθημα: `docker ps -a --filter "volume=<name>"` είναι ο πρώτος έλεγχος όποτε ένα volume "δεν καθαρίζει".
+
+### Performance characteristics (μετρημένο, όχι θεωρητικό)
+
+- **Πρώτο-ποτέ full scan (16 containers, κρύα DB + κρύο per-image cache)**: ~6m35s
+- **Full scan με ήδη-ζεστό cache**: ~12s
+- Single-target scan με ζεστό cache: <1s
+
+Το μεγάλο χάσμα (6m35s → 12s) δεν οφείλεται μόνο στο one-time DB download (~108MB) — το per-image analysis cache χτίζεται ξεχωριστά ανά image την πρώτη φορά που σκανάρεται, όχι μόνο η CVE DB μία φορά συνολικά.
+
+### Πρακτικό εύρημα από το πρώτο πραγματικό scan
+
+Vaultwarden: 8 critical, 39 high, 92 medium, 28 fixable. Grafana: 9 critical, 107 high, 165 medium, 281 fixable. Open WebUI: 27 critical, 460 high, 2045 medium (επιβεβαιώθηκε standalone, όχι parsing bug — μεγάλο dependency tree, Debian+Python+Node+Rust μαζί). Pi-hole: 0 critical, 15 high, 4 medium, 19 fixable — όλα σε `bind-libs`/`bind-tools`/`c-ares`.
+
+Δοκιμάστηκε `docker pull` + Portainer stack redeploy στο Vaultwarden (νομίζαμε ότι θα διόρθωνε CVEs) — **καμία αλλαγή** στα νούμερα μετά. Εξήγηση: το `curl`/`gzip` CVEs στο Vaultwarden image δεν έχουν ακόμα fixed version upstream (`fixed: null` στο raw Trivy output) — δεν είναι κάτι που pull/redeploy μπορεί να διορθώσει, είναι upstream-blocked μέχρι το επόμενο base image release. Καθαρή υπενθύμιση: "fixable" στο tool σημαίνει "υπάρχει fixed version", όχι "θα διορθωθεί αν κάνεις pull τώρα" — αν το image που τραβάς ήδη περιέχει το fix, το pull δεν αλλάζει τίποτα.
 
 ---
 
